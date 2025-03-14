@@ -1,5 +1,5 @@
 [project]
-name = "sandbox-service"
+name = "sandboxer"
 version = "0.1.0"
 description = "Code sandboxing made easy"
 readme = "README.md"
