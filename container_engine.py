@@ -13,6 +13,7 @@ class Container:
         self.engine = engine
         self.id = kwargs.get("id", "unknown")
         self.ip_address = kwargs.get("ip_address", None)
+        self.exposed_port = kwargs.get("exposed_port", None)
         self.name = kwargs.get("name", "unknown")
         self.status = kwargs.get("status", "unknown")
         self.image = kwargs.get("image", "unknown")
@@ -68,11 +69,12 @@ class ContainerEngine:
 
         containers = []
         for data in containers_data:
-            ip_address = await self._get_container_ip(data["Id"]) if data["State"] == "running" else "N/A"
+            ip_address, exposed_port = await self._get_container_ip(data["Id"]) if data["State"] == "running" else "N/A"
             containers.append(
                 Container(
                     id=data["Id"],
                     ip_address=ip_address,
+                    exposed_port=exposed_port,
                     engine=self,
                     name=data["Names"][0] if data["Names"] else "unknown",
                     status=data["State"],
@@ -96,7 +98,8 @@ class ContainerEngine:
         args = self.podman_path + ['exec', '-i', container_id]
 
         if isinstance(command, str):
-            args.extend(['sh', '-c', command])  # Use shell for string commands
+            #args.extend(['sh', '-c', command])  # Use shell for string commands
+            args.extend([command])
         else:
             args.extend(command)  # Pass list directly to avoid shell injection
 
@@ -148,20 +151,23 @@ class ContainerEngine:
         ]
         
         container_id = await self._run_podman_command(args)
-        print(f'started container: {container_id}')
-        container_ip = await self._get_container_ip(container_id)
-        print(f'container ip: {container_ip}')
+        container_ip, exposed_port = await self._get_container_ip(container_id)
 
-        return Container(id=container_id, ip_address=container_ip, engine=self)
+        return Container(id=container_id, ip_address=container_ip, exposed_port=exposed_port, engine=self)
 
-    async def _get_container_ip(self, container_id: str) -> str:
-        """
-        Inspect a container and return its assigned IP address.
-        """
+    async def _get_container_ip(self, container_id: str) -> Tuple[str, Optional[str]]:
+        """Inspect a container and return its assigned private IP and first exposed port."""
         output = await self._run_podman_command(['inspect', container_id])
-        container_info = json.loads(output)
-        ip_address = container_info[0]['NetworkSettings']['IPAddress']
-        return ip_address
+        container_info = json.loads(output)[0]
+
+        ip_address = container_info["NetworkSettings"]["IPAddress"]
+        
+        # Extract the first exposed port (even if its value is null)
+        ports = container_info["NetworkSettings"]["Ports"]
+        first_exposed_port = next(iter(ports.keys()), None) if ports else None
+        first_exposed_port = first_exposed_port.split('/')[0] if first_exposed_port else None
+
+        return ip_address, first_exposed_port
 
     async def get_container(self, container_id: str) -> Optional[Container]:
         """Inspect a container and return a `Container` object."""
@@ -169,10 +175,16 @@ class ContainerEngine:
             output = await self._run_podman_command(['inspect', container_id])
             data = json.loads(output)[0]
 
+            # Extract the first exposed port (even if its value is null)
+            ports = data["NetworkSettings"]["Ports"]
+            first_exposed_port = next(iter(ports.keys()), None) if ports else None
+            first_exposed_port = first_exposed_port.split('/')[0] if first_exposed_port else None
+
             return Container(
                 engine=self,
                 id=data["Id"],
-                ip_address=data['NetworkSettings']['IPAddress'] if data["State"] == "running" else None,
+                ip_address=data['NetworkSettings']['IPAddress'],
+                exposed_port=first_exposed_port,
                 name=data.get("Name", "").lstrip("/"),
                 state=data.get("State", "unknown"),
                 image=data.get("Image", "unknown"),

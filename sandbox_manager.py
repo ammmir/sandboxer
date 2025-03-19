@@ -1,9 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import asyncio
 import time
+import httpx
 import uuid
 import pickle
 import json
@@ -17,8 +19,10 @@ SANDBOX_DB_PATH = "sandbox.db"
 SANDBOX_PORT = 8000
 IDLE_TIMEOUT = 60
 CHECK_INTERVAL = 60
+PROXY_TIMEOUT = 30
 
 engine = ContainerEngine()
+hx = httpx.AsyncClient()
 sandbox_db = {}
 
 async def terminate_idle_sandboxes():
@@ -76,6 +80,9 @@ class CreateSandboxRequest(BaseModel):
     image: str
     label: str
 
+class ForkSandboxRequest(BaseModel):
+    label: str
+
 class ExecuteRequest(BaseModel):
     code: str
 
@@ -121,7 +128,7 @@ async def create_sandbox(request: CreateSandboxRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/sandboxes/{sandbox_id}/fork")
-async def fork_sandbox(sandbox_id: str, request: CreateSandboxRequest):
+async def fork_sandbox(sandbox_id: str, request: ForkSandboxRequest):
     """Fork an existing sandbox container."""
     if sandbox_id not in sandbox_db:
         raise HTTPException(status_code=404, detail="Sandbox not found")
@@ -178,20 +185,31 @@ async def get_sandbox_tree(sandbox_id: str):
     if sandbox_id not in sandbox_db:
         raise HTTPException(status_code=404, detail="Sandbox not found")
 
-    def build_tree(node_id, prefix=""):
-        """Builds both string and JSON representations of the tree."""
+    def build_tree(node_id, prefix="", is_root=False, is_last=True):
+        """Recursively builds the formatted string tree and JSON structure."""
         node = sandbox_db[node_id]
-        node_label = f"{node['label']} [{node_id}]"
-        
-        # Add to string representation
-        tree_repr.append(f"{prefix} 📦 {node_label}")
+        node_label = f"📦 {node['label']} [{node_id}]"
+
+        # Root node: No connector, just the label
+        if is_root:
+            tree_repr.append(node_label)
+        else:
+            connector = "└── " if is_last else "├── "
+            tree_repr.append(f"{prefix}{connector}{node_label}")
 
         # Build JSON representation
-        children = [build_tree(child_id, prefix + " ├──") for child_id in node["child_ids"]]
-        return {"id": node_id, "label": node["label"], "children": children}
+        children = sandbox_db[node_id]["child_ids"]
+        tree_json = {"id": node_id, "label": node["label"], "children": []}
+
+        new_prefix = prefix + ("    " if is_last else "│   ")
+
+        for i, child_id in enumerate(children):
+            tree_json["children"].append(build_tree(child_id, new_prefix, False, i == len(children) - 1))
+
+        return tree_json
 
     tree_repr = []
-    tree_json = build_tree(sandbox_id)
+    tree_json = build_tree(sandbox_id, "", True, True)
 
     return {
         "tree": "\n".join(tree_repr),  # Pretty-print tree
@@ -227,15 +245,94 @@ async def execute_code(sandbox_id: str, request: ExecuteRequest, stream: bool = 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.api_route("/sandboxes/{sandbox_id}/proxy/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
+async def proxy_request(sandbox_id: str, path: str, request: Request):
+    """Proxies HTTP requests into the correct sandbox using its private IP and exposed port."""
+    if sandbox_id not in sandbox_db:
+        raise HTTPException(status_code=404, detail="Sandbox not found")
+
+    container = await engine.get_container(sandbox_id)
+    if not container or not container.ip_address or not container.exposed_port:
+        raise HTTPException(status_code=500, detail="Sandbox container is missing network info")
+
+    sandbox_url = f"http://{container.ip_address}:{container.exposed_port}/{path}"
+    print(f'PROXY URL: {sandbox_url}')
+
+    # Extract the real client's IP
+    client_ip = request.client.host
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+
+    # Append the client IP to the X-Forwarded-For header
+    if forwarded_for:
+        forwarded_for = f"{forwarded_for}, {client_ip}"
+    else:
+        forwarded_for = client_ip
+
+    # Sanitize headers for security
+    headers = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower() not in {"host", "x-forwarded-for", "x-real-ip"}
+    }
+
+    headers["X-Forwarded-For"] = forwarded_for
+
+    # Create an HTTP client (without context manager)
+    client = httpx.AsyncClient()
+
+    async def stream_request_body(request: Request):
+        """Generator that streams the request body"""
+        async for chunk in request.stream():
+            #print(f'>>>> CHUNK: {chunk}')
+            yield chunk
+
+    try:
+        req = client.build_request(request.method, sandbox_url,
+            headers=headers,
+            params=request.query_params,
+            content=stream_request_body(request),  # Stream the request body properly
+            timeout=PROXY_TIMEOUT,
+        )
+        response = await client.send(req, stream=True)
+
+        async def stream_response_body():
+            """Generator that streams the response body"""
+            async for chunk in response.aiter_raw():
+                #print(f'<<<< CHUNK: {chunk}')
+                yield chunk
+
+        # Extract response headers and send them immediately
+        response_headers = {k: v for k, v in response.headers.items()}
+
+        return StreamingResponse(
+            stream_response_body(),
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            background=BackgroundTask(response.aclose)
+        )
+    except httpx.RemoteProtocolError as e:
+        print(f"Downstream connection error: {e}")
+        return JSONResponse(
+            {"error": "Sandbox connection was unexpectedly closed"},
+            status_code=502
+        )
+    except asyncio.CancelledError:
+        print("Client disconnected. Closing sandbox request.")
+    except Exception as e:
+        print(f"Error while proxying: {e}")
+        raise HTTPException(status_code=502, detail="Sandbox connection failed")
+
 @app.delete("/sandboxes/{sandbox_id}")
 async def delete_sandbox(sandbox_id: str):
     if sandbox_id not in sandbox_db:
         raise HTTPException(status_code=404, detail="Sandbox not found")
     try:
         container = await engine.get_container(sandbox_id)
-        container.stop()
+        await container.stop()
+        parent_id = sandbox_db[sandbox_id]["parent_id"]
+        if parent_id and parent_id in sandbox_db:
+            sandbox_db[parent_id]["child_ids"].remove(sandbox_id)
         sandbox_db[sandbox_id]["deleted_at"] = time.time()
-        # TODO: remove from parent's child list
         return {"message": f"Sandbox {sandbox_id} deleted"}
     except e:
         raise HTTPException(status_code=404, detail="Sandbox not found")
