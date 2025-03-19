@@ -151,6 +151,63 @@ async def fork_sandbox(sandbox_id: str, request: ForkSandboxRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/sandboxes/{parent_sandbox_id}/coalesce/{final_sandbox_id}")
+async def coalesce_sandbox(parent_sandbox_id: str, final_sandbox_id: str):
+    """
+    Terminates all sandboxes **in the entire subtree** of parent_sandbox_id,
+    except for final_sandbox_id, which becomes the new root.
+    """
+
+    if parent_sandbox_id not in sandbox_db:
+        raise HTTPException(status_code=404, detail="Parent sandbox not found")
+
+    if final_sandbox_id not in sandbox_db:
+        raise HTTPException(status_code=404, detail="Final sandbox not found")
+
+    # Ensure final_sandbox_id is actually a descendant of parent_sandbox_id
+    def collect_tree_nodes(node_id):
+        """Recursively collect all sandbox IDs in the tree."""
+        nodes = [node_id]
+        for child_id in sandbox_db[node_id]["child_ids"]:
+            nodes.extend(collect_tree_nodes(child_id))
+        return nodes
+
+    full_tree = collect_tree_nodes(parent_sandbox_id)
+
+    if final_sandbox_id not in full_tree:
+        raise HTTPException(status_code=400, detail="Final sandbox is not a descendant of the parent sandbox")
+
+    # Remove **only** final_sandbox_id from termination list
+    sandboxes_to_terminate = [sbx_id for sbx_id in full_tree if sbx_id != final_sandbox_id]
+
+    print(f'FULL TREE      : {full_tree}')
+    print(f'TO TERMINATE   : {sandboxes_to_terminate}')
+
+    if not sandboxes_to_terminate:
+        return {"message": "Nothing to coalesce, target is already the root"}
+
+    # Terminate all sandboxes except final_sandbox_id
+    for sbx_id in sandboxes_to_terminate:
+        try:
+            container = await engine.get_container(sbx_id)
+            if container:
+                await container.stop()
+            sandbox_db[sbx_id]["deleted_at"] = time.time()
+        except Exception:
+            sandbox_db[sbx_id]["deleted_at"] = time.time()
+
+    # Remove references to terminated sandboxes from their parents
+    for sbx_id in sandboxes_to_terminate:
+        parent_id = sandbox_db[sbx_id]["parent_id"]
+        if parent_id and parent_id in sandbox_db:
+            sandbox_db[parent_id]["child_ids"].remove(sbx_id)
+
+    # Make final_sandbox_id the **only survivor and root**
+    sandbox_db[final_sandbox_id]["parent_id"] = None
+
+    return {
+        "message": f"Sandbox {final_sandbox_id} is now the new root, all other branches have been terminated"
+    }
 @app.get("/sandboxes/{sandbox_id}")
 async def get_sandbox(sandbox_id: str):
     if sandbox_id not in sandbox_db:
@@ -256,7 +313,7 @@ async def proxy_request(sandbox_id: str, path: str, request: Request):
         raise HTTPException(status_code=500, detail="Sandbox container is missing network info")
 
     sandbox_url = f"http://{container.ip_address}:{container.exposed_port}/{path}"
-    print(f'PROXY URL: {sandbox_url}')
+    #print(f'PROXY URL: {sandbox_url}')
 
     # Extract the real client's IP
     client_ip = request.client.host
@@ -326,16 +383,17 @@ async def proxy_request(sandbox_id: str, path: str, request: Request):
 async def delete_sandbox(sandbox_id: str):
     if sandbox_id not in sandbox_db:
         raise HTTPException(status_code=404, detail="Sandbox not found")
-    try:
-        container = await engine.get_container(sandbox_id)
-        await container.stop()
-        parent_id = sandbox_db[sandbox_id]["parent_id"]
-        if parent_id and parent_id in sandbox_db:
-            sandbox_db[parent_id]["child_ids"].remove(sandbox_id)
-        sandbox_db[sandbox_id]["deleted_at"] = time.time()
-        return {"message": f"Sandbox {sandbox_id} deleted"}
-    except e:
+
+    container = await engine.get_container(sandbox_id)
+    if not container:
         raise HTTPException(status_code=404, detail="Sandbox not found")
+
+    await container.stop()
+    parent_id = sandbox_db[sandbox_id]["parent_id"]
+    if parent_id and parent_id in sandbox_db:
+        sandbox_db[parent_id]["child_ids"].remove(sandbox_id)
+    sandbox_db[sandbox_id]["deleted_at"] = time.time()
+    return {"message": f"Sandbox {sandbox_id} deleted"}
 
 if __name__ == "__main__":
     import uvicorn

@@ -140,7 +140,30 @@ print(f"✅ POST Response Status: {post_response.status_code}")
 print("✅ POST Response Body:")
 print(post_response.text)
 
-# ✅ Step 11: Delete all sandboxes (grandchild first, then second fork, then first fork, then root)
+# ✅ Step 11: Coalesce all sandboxes into the grandchild sandbox
+print("\n🔄 Coalescing all sandboxes into grandchild sandbox...")
+
+coalesce_response = httpx.post(f"{BASE_URL}/sandboxes/{root_sandbox_id}/coalesce/{grandchild_sandbox_id}")
+if coalesce_response.status_code != 200:
+    print("Error coalescing sandboxes:", coalesce_response.text)
+    exit(1)
+
+print(f"✅ Coalesced sandboxes. Only {grandchild_sandbox_id} should remain.")
+
+# ✅ Step 12: Print final sandbox tree
+final_tree_response = httpx.get(f"{BASE_URL}/sandboxes/{grandchild_sandbox_id}/tree")
+if final_tree_response.status_code != 200:
+    print("Error fetching final sandbox tree:", final_tree_response.text)
+    exit(1)
+
+final_tree_data = final_tree_response.json()
+print("\n🌲 Final Sandbox Tree (Formatted):")
+print(final_tree_data["tree"])
+
+print("\n🌲 Final Sandbox Tree (JSON):")
+print(json.dumps(final_tree_data["tree_json"], indent=2))
+
+# ✅ Step 13: Delete all sandboxes
 print("\n🗑️ Deleting sandboxes...")
 
 def delete_sandbox(sandbox_id):
