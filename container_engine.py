@@ -69,7 +69,7 @@ class ContainerEngine:
 
         containers = []
         for data in containers_data:
-            ip_address, exposed_port = await self._get_container_ip(data["Id"]) if data["State"] == "running" else "N/A"
+            ip_address, exposed_port = await self._get_container_ip(data["Id"])
             containers.append(
                 Container(
                     id=data["Id"],
@@ -98,10 +98,13 @@ class ContainerEngine:
         args = self.podman_path + ['exec', '-i', container_id]
 
         if isinstance(command, str):
-            #args.extend(['sh', '-c', command])  # Use shell for string commands
-            args.extend([command])
+            # If it's a single command with spaces, wrap it in `sh -c`
+            if " " in command:
+                args.extend(['sh', '-c', command])
+            else:
+                args.append(command)
         else:
-            args.extend(command)  # Pass list directly to avoid shell injection
+            args.extend(command)  # Use the provided list as-is
 
         process = await asyncio.create_subprocess_exec(
             *args,
