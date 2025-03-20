@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -16,8 +16,7 @@ from container_engine import ContainerEngine, Container
 # configuration
 CONTAINER_PREFIX = "sandbox_"
 SANDBOX_DB_PATH = "sandbox.db"
-SANDBOX_PORT = 8000
-IDLE_TIMEOUT = 60
+IDLE_TIMEOUT = 24*60*60
 CHECK_INTERVAL = 60
 PROXY_TIMEOUT = 30
 
@@ -394,6 +393,10 @@ async def delete_sandbox(sandbox_id: str):
         sandbox_db[parent_id]["child_ids"].remove(sandbox_id)
     sandbox_db[sandbox_id]["deleted_at"] = time.time()
     return {"message": f"Sandbox {sandbox_id} deleted"}
+
+@app.get("/")
+async def serve_ui():
+    return FileResponse("ui.html")
 
 if __name__ == "__main__":
     import uvicorn

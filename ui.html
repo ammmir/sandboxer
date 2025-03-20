@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sandbox Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="h-screen flex bg-gray-100">
+
+    <!-- Sidebar -->
+    <div class="w-1/4 bg-white shadow-md p-4 flex flex-col">
+        <h2 class="text-lg font-semibold mb-2">Sandboxes</h2>
+        <button class="bg-blue-500 text-white px-4 py-2 rounded mb-4 w-full"
+                onclick="openCreateModal()">
+            ➕ Create Sandbox
+        </button>
+        <ul id="sandbox-tree" class="space-y-2 flex-grow overflow-auto"></ul>
+    </div>
+
+    <!-- Main Content -->
+    <div class="w-3/4 flex flex-col p-4">
+
+        <h2 class="text-lg font-semibold">Sandbox Console</h2>
+
+        <!-- Sandbox Status Bar -->
+        <div id="sandbox-status" class="bg-gray-300 text-gray-800 p-2 rounded mt-2 text-sm flex justify-between items-center">
+            <span id="sandbox-info">Select a sandbox to view status.</span>
+            <div id="sandbox-actions" class="hidden space-x-2">
+                <button class="bg-gray-500 text-white px-3 py-1 rounded text-sm" onclick="renameSandbox()">✏ Rename</button>
+                <button class="bg-red-500 text-white px-3 py-1 rounded text-sm" onclick="deleteSandbox()">❌ Stop</button>
+                <button class="bg-purple-500 text-white px-3 py-1 rounded text-sm" onclick="forkSandbox()">🔀 Fork</button>
+            </div>
+        </div>
+
+        <!-- Error Alert -->
+        <div id="error-alert" class="hidden bg-red-500 text-white p-3 rounded mt-2">
+            <span id="error-message"></span>
+            <button class="float-right font-bold" onclick="hideError()">✖</button>
+        </div>
+
+        <!-- Execution Results (like chat) -->
+        <div id="exec-results" class="flex-grow bg-gray-200 p-4 rounded mt-4 overflow-auto h-[60vh]">
+            <p class="text-gray-500">Execution results will appear here.</p>
+        </div>
+
+        <!-- Command Input & Buttons (Fixed at Bottom) -->
+        <div class="bg-white p-4 shadow-md flex items-center gap-2">
+            <textarea id="exec-code" class="border p-2 w-full h-12 resize-none" placeholder="Enter command..."
+                      onkeydown="handleEnter(event)"></textarea>
+            <button class="bg-green-500 text-white px-4 rounded" onclick="executeCode()">▶ Run</button>
+        </div>
+    </div>
+
+    <!-- Create Sandbox Modal -->
+    <div id="create-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex justify-center items-center">
+        <div class="bg-white p-6 rounded shadow-md w-1/3">
+            <h2 class="text-lg font-semibold">Create Sandbox</h2>
+            <label class="block mt-2">Docker Image:</label>
+            <input type="text" id="sandbox-image" class="border p-2 w-full" placeholder="e.g., python:3">
+
+            <label class="block mt-2">Label:</label>
+            <input type="text" id="sandbox-label" class="border p-2 w-full" placeholder="Sandbox Label">
+
+            <div class="mt-4 flex justify-end">
+                <button class="bg-gray-500 text-white px-4 py-2 mr-2 rounded" onclick="closeCreateModal()">Cancel</button>
+                <button class="bg-blue-500 text-white px-4 py-2 rounded" onclick="createSandbox()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedSandbox = null;
+
+        async function loadSandboxes() {
+            try {
+                const response = await fetch("/sandboxes");
+                if (!response.ok) throw new Error("Failed to fetch sandboxes.");
+                const data = await response.json();
+                document.getElementById("sandbox-tree").innerHTML = renderTree(data.sandboxes);
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        function renderTree(sandboxes, parentId = null) {
+            let html = "";
+            sandboxes.forEach(sb => {
+                if (sb.parent_id === parentId) {
+                    html += `
+                        <li class="pl-4">
+                            <button class="text-blue-500 font-semibold" onclick="selectSandbox('${sb.id}')">
+                                📦 ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}]
+                            </button>
+                            <ul>${renderTree(sandboxes, sb.id)}</ul>
+                        </li>
+                    `;
+                }
+            });
+            return html;
+        }
+
+        async function selectSandbox(sandboxId) {
+            selectedSandbox = sandboxId;
+            try {
+                const response = await fetch(`/sandboxes/${sandboxId}`);
+                if (!response.ok) throw new Error("Failed to fetch sandbox details.");
+                const sb = await response.json();
+
+                document.getElementById("sandbox-info").innerText = 
+                    `📦 ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}] | Status: ${sb.status} | IP: ${sb.ip_address || "N/A"}`;
+
+                // Show action buttons (Stop & Rename)
+                document.getElementById("sandbox-actions").classList.remove("hidden");
+
+                // Clear execution results when switching sandbox
+                document.getElementById("exec-results").innerHTML = "";
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        async function createSandbox() {
+            hideError();
+            const image = document.getElementById('sandbox-image').value.trim();
+            const label = document.getElementById('sandbox-label').value.trim();
+            if (!image || !label) return showError("Please enter a Docker image and a label.");
+
+            try {
+                const response = await fetch("/sandboxes", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ image, label })
+                });
+
+                if (!response.ok) throw new Error(await response.text());
+                closeCreateModal();
+                loadSandboxes();
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        async function forkSandbox() {
+            if (!selectedSandbox) return showError("Select a sandbox first.");
+            try {
+                const label = prompt("Enter label for the forked sandbox:");
+                if (!label) return;
+                const response = await fetch(`/sandboxes/${selectedSandbox}/fork`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ label })
+                });
+
+                if (!response.ok) throw new Error(await response.text());
+                loadSandboxes();
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        async function executeCode() {
+            if (!selectedSandbox) return showError("Select a sandbox first.");
+            const codeInput = document.getElementById("exec-code");
+            const code = codeInput.value.trim();
+            if (!code) return showError("Enter a command.");
+
+            // Clear input field after pressing run
+            codeInput.value = "";
+
+            // Create a new result div for this execution
+            const resultDiv = document.createElement("pre");
+            resultDiv.classList = "bg-black text-green-400 text-wrap p-2 rounded shadow my-2 overflow-auto";
+            resultDiv.innerHTML = `> ${code}`;
+            document.getElementById("exec-results").append(resultDiv);
+
+            try {
+                const response = await fetch(`/sandboxes/${selectedSandbox}/execute?stream=true`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ code })
+                });
+
+                if (!response.ok || !response.body) throw new Error("Failed to stream execution.");
+
+                // Stream processing
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = "";
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+
+                    // Process complete lines (JSON objects)
+                    let lines = buffer.split("\n");
+                    buffer = lines.pop(); // Save incomplete line for next read
+
+                    for (let line of lines) {
+                        try {
+                            const data = JSON.parse(line.trim());
+                            if (data.type === "stdout" || data.type === "stderr") {
+                                resultDiv.innerHTML += `\n${data.output}`;
+                            } else if (data.type === "exit") {
+                                //resultDiv.innerHTML += `\n🛑 ${data.output}`;
+                            }
+                        } catch (err) {
+                            console.warn("Error parsing streamed JSON:", line, err);
+                        }
+                    }
+
+                    // Scroll to the bottom when new results appear
+                    document.getElementById("exec-results").scrollTop = document.getElementById("exec-results").scrollHeight;
+                }
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        async function deleteSandbox() {
+            if (!selectedSandbox) return showError("Select a sandbox first.");
+            if (!confirm("Are you sure you want to stop this sandbox?")) return;
+            try {
+                const response = await fetch(`/sandboxes/${selectedSandbox}`, { method: "DELETE" });
+                if (!response.ok) throw new Error(await response.text());
+                loadSandboxes();
+                document.getElementById("sandbox-status").innerText = "Select a sandbox to view status.";
+                document.getElementById("sandbox-actions").classList.add("hidden");
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        async function renameSandbox() {
+            if (!selectedSandbox) return showError("Select a sandbox first.");
+            const newLabel = prompt("Enter new label:");
+            if (!newLabel) return;
+            try {
+                const response = await fetch(`/sandboxes/${selectedSandbox}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ label: newLabel })
+                });
+
+                if (!response.ok) throw new Error(await response.text());
+                loadSandboxes();
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        function handleEnter(event) {
+            if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                executeCode();
+            }
+        }
+
+        function showError(message) {
+            document.getElementById("error-message").innerText = message;
+            document.getElementById("error-alert").classList.remove("hidden");
+        }
+
+        function hideError() {
+            document.getElementById("error-alert").classList.add("hidden");
+        }
+
+        function openCreateModal() { document.getElementById("create-modal").classList.remove("hidden"); }
+        function closeCreateModal() { document.getElementById("create-modal").classList.add("hidden"); }
+
+        loadSandboxes();
+    </script>
+</body>
+</html>
