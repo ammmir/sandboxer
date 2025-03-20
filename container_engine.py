@@ -285,13 +285,20 @@ class ContainerEngine:
             
             return snapshot_file
 
-    async def fork_container(self, container_id: str, new_name: str) -> str:
+    async def fork_container(self, container_id: str, new_name: str, keep_snapshot: bool = False) -> Tuple[Container, str]:
         """
         Forks a running container by:
         1. Creating a snapshot
         2. Duplicating volumes
         3. Editing the checkpoint metadata
         4. Restoring the container with new volumes
+
+        Returns:
+        - A tuple containing:
+        - `Container`: The new forked container.
+        - `str`: Path to the modified snapshot file.
+
+        If `keep_snapshot=True`, the snapshot file will be retained after forking.
         """
         snapshot_file = f"{new_name}.tar.gz"
 
@@ -312,7 +319,14 @@ class ContainerEngine:
 
         container_ip = await self._get_container_ip(restored_id)
 
-        return Container(id=restored_id, ip_address=container_ip, engine=self)
+        # Delete snapshot if requested
+        if not keep_snapshot:
+            try:
+                os.remove(modified_snapshot)
+            except OSError as e:
+                print(f"Failed to delete snapshot {modified_snapshot}: {e}")
+
+        return Container(id=restored_id, ip_address=container_ip, engine=self), modified_snapshot
 
     async def close(self):
         """Placeholder for cleanup if needed later."""

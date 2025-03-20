@@ -11,14 +11,14 @@ async def main():
     print(f"✅ Started root sandbox {root.id} with IP {root.ip_address}")
 
     # 🌿 Step 2: Fork twice from the root container
-    fork1 = await engine.fork_container(root.id, "fork_1")
-    fork2 = await engine.fork_container(root.id, "fork_2")
+    fork1, _ = await engine.fork_container(root.id, "fork_1")
+    fork2, _ = await engine.fork_container(root.id, "fork_2")
 
     print(f"✅ Forked first sandbox {fork1.id}")
     print(f"✅ Forked second sandbox {fork2.id}")
 
     # 🍃 Step 3: Fork again from one of the forks
-    deep_fork = await engine.fork_container(fork2.id, "deep_fork")
+    deep_fork, _ = await engine.fork_container(fork2.id, "deep_fork")
     print(f"✅ Forked deep sandbox {deep_fork.id}")
 
     # 🛠 Step 4: Execute a command in the root container

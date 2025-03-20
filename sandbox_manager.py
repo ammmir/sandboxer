@@ -137,7 +137,7 @@ async def fork_sandbox(sandbox_id: str, request: ForkSandboxRequest):
     child_label = request.label if request.label else f"Fork of {parent_data['label']}"
 
     try:
-        forked_container = await engine.fork_container(sandbox_id, f"{sandbox_id}-fork-{str(uuid.uuid4())[:8]}")
+        forked_container, _ = await engine.fork_container(sandbox_id, f"{sandbox_id}-fork-{str(uuid.uuid4())[:8]}")
         sandbox_db[forked_container.id] = {
             "label": child_label,
             "last_active_at": time.time(),
