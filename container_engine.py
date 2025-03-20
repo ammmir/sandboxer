@@ -253,8 +253,8 @@ class ContainerEngine:
 
         return new_volumes
 
-    def _edit_checkpoint(self, snapshot_file: str, volume_map: Dict[str, str], new_volumes: Dict[str, str]) -> str:
-        """Extract, modify, and repack the checkpoint to update volume references."""
+    def _edit_checkpoint(self, snapshot_file: str, volume_map: Dict[str, str], new_volumes: Dict[str, str]) -> None:
+        """Modify the checkpoint tar file in-place by updating volume references."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Extract checkpoint
             with tarfile.open(snapshot_file, "r:*") as tar:
@@ -271,18 +271,19 @@ class ContainerEngine:
                 for mount_path, old_volume in volume_map.items():
                     new_volume = new_volumes[mount_path]
                     content = content.replace(old_volume, new_volume)
-                    content = content.replace(f"/var/lib/containers/storage/volumes/{old_volume}/_data",
-                                              f"/var/lib/containers/storage/volumes/{new_volume}/_data")
+                    content = content.replace(
+                        f"/var/lib/containers/storage/volumes/{old_volume}/_data",
+                        f"/var/lib/containers/storage/volumes/{new_volume}/_data"
+                    )
 
                 with open(file_path, "w") as f:
                     f.write(content)
 
-            # Repack the modified checkpoint
-            modified_snapshot = f"{snapshot_file}.modified.tar.gz"
-            with tarfile.open(modified_snapshot, "w:gz") as tar:
+            # Overwrite the original tar file with the modified contents
+            with tarfile.open(snapshot_file, "w:gz") as tar:
                 tar.add(temp_dir, arcname=".")
-
-        return modified_snapshot
+            
+            return snapshot_file
 
     async def fork_container(self, container_id: str, new_name: str) -> str:
         """
