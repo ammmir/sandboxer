@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
@@ -10,6 +10,7 @@ import uuid
 import pickle
 import json
 import os
+import websockets
 
 from container_engine import ContainerEngine, Container
 
@@ -429,6 +430,117 @@ async def delete_sandbox(sandbox_id: str):
 @app.get("/")
 async def serve_ui():
     return FileResponse("ui.html")
+
+@app.websocket("/sandboxes/{sandbox_id}/proxy/{path:path}")
+async def proxy_websocket(websocket: WebSocket, sandbox_id: str, path: str):
+    """Proxies WebSocket connections into the sandbox."""
+    if sandbox_id not in sandbox_db:
+        await websocket.close(code=4004, reason="Sandbox not found")
+        return
+
+    container = await engine.get_container(sandbox_id)
+    if not container or not container.ip_address or not container.exposed_port:
+        await websocket.close(code=4005, reason="Sandbox container is missing network info")
+        return
+
+    # Get the requested WebSocket subprotocols from the client
+    requested_protocols = websocket.headers.get("sec-websocket-protocol", "").split(",")
+    requested_protocols = [p.strip() for p in requested_protocols if p.strip()]
+    
+    # For VNC connections, ensure we have the right protocol
+    if "binary" in requested_protocols:
+        selected_protocol = "binary"
+    else:
+        selected_protocol = requested_protocols[0] if requested_protocols else None
+
+    sandbox_url = f"ws://{container.ip_address}:{container.exposed_port}/{path}"
+    print(f"Connecting to sandbox WebSocket: {sandbox_url} with protocol: {selected_protocol}")
+    
+    try:
+        # Accept the WebSocket connection with the selected protocol
+        await websocket.accept(subprotocol=selected_protocol)
+        
+        # Connect to the sandbox WebSocket with the same protocol
+        additional_headers = {}
+        if selected_protocol:
+            additional_headers["Sec-WebSocket-Protocol"] = selected_protocol
+            
+        async with websockets.connect(
+            sandbox_url,
+            subprotocols=[selected_protocol] if selected_protocol else None,
+            additional_headers=additional_headers if additional_headers else None
+        ) as sandbox_ws:
+            # Create tasks for bidirectional forwarding
+            async def forward_to_sandbox():
+                try:
+                    while True:
+                        try:
+                            # Receive raw socket data
+                            message = await websocket.receive()
+                            if message["type"] == "websocket.disconnect":
+                                break
+                            
+                            # Forward the message
+                            if message["type"] == "websocket.receive":
+                                if "bytes" in message:
+                                    await sandbox_ws.send(message["bytes"])
+                                elif "text" in message:
+                                    await sandbox_ws.send(message["text"])
+                        except Exception as e:
+                            print(f"Error forwarding to sandbox: {e}")
+                            break
+                except Exception as e:
+                    print(f"Error in forward_to_sandbox: {e}")
+
+            async def forward_to_client():
+                try:
+                    while True:
+                        try:
+                            # Receive and forward data
+                            message = await sandbox_ws.recv()
+                            if isinstance(message, bytes):
+                                await websocket.send_bytes(message)
+                            else:
+                                await websocket.send_text(message)
+                        except Exception as e:
+                            print(f"Error forwarding to client: {e}")
+                            break
+                except Exception as e:
+                    print(f"Error in forward_to_client: {e}")
+
+            # Run both forwarding tasks
+            forward_tasks = [
+                asyncio.create_task(forward_to_sandbox()),
+                asyncio.create_task(forward_to_client())
+            ]
+            
+            try:
+                # Wait for either task to complete
+                done, pending = await asyncio.wait(
+                    forward_tasks,
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # Cancel pending tasks
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    
+            except Exception as e:
+                print(f"Error in main proxy loop: {e}")
+                
+    except websockets.exceptions.InvalidStatusCode as e:
+        print(f"Invalid status code connecting to sandbox: {e}")
+        await websocket.close(code=4006, reason=f"Failed to connect to sandbox: {str(e)}")
+    except Exception as e:
+        print(f"WebSocket proxy error: {e}")
+        try:
+            await websocket.close(code=4007, reason="Internal proxy error")
+        except Exception:
+            pass  # Connection might already be closed
 
 if __name__ == "__main__":
     import uvicorn
