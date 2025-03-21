@@ -50,6 +50,11 @@
                     onclick="switchTab('logs')">
                 Logs
             </button>
+            <button id="http-tab" 
+                    class="px-4 py-2 text-sm font-medium rounded-t-lg border-t border-l border-r ml-2 bg-gray-100"
+                    onclick="switchTab('http')">
+                HTTP
+            </button>
         </div>
 
         <!-- Command Execution View -->
@@ -72,6 +77,27 @@
                 <p class="text-gray-500">Sandbox logs will appear here.</p>
             </div>
         </div>
+
+        <!-- HTTP View -->
+        <div id="http-view" class="hidden flex-grow flex flex-col">
+            <div class="flex items-center gap-2 mt-4">
+                <button class="text-gray-600 px-2 py-1 rounded hover:bg-gray-100" onclick="goBack()" title="Back">
+                    ◀
+                </button>
+                <button class="text-gray-600 px-2 py-1 rounded hover:bg-gray-100" onclick="goForward()" title="Forward">
+                    ▶
+                </button>
+                <input type="text" id="url-bar" class="border p-2 flex-grow rounded" 
+                       placeholder="Enter URL..." 
+                       onkeydown="handleUrlEnter(event)">
+                <button class="text-gray-600 px-2 py-1 rounded hover:bg-gray-100" onclick="refreshIframe()" title="Refresh">
+                    ↻
+                </button>
+                <button class="bg-blue-500 text-white px-4 py-2 rounded" onclick="navigateIframe()">Go</button>
+            </div>
+            <iframe id="sandbox-iframe" class="w-full flex-grow mt-4 border rounded" sandbox="allow-same-origin allow-scripts allow-forms"></iframe>
+        </div>
+
     </div>
 
     <!-- Create Sandbox Modal -->
@@ -151,6 +177,11 @@
                     stopLogsFetching();
                 } else {
                     startLogsFetching();
+                }
+
+                // Initialize HTTP view if we're on the HTTP tab
+                if (!document.getElementById("http-view").classList.contains("hidden")) {
+                    initializeHttpView();
                 }
             } catch (error) {
                 showError(error.message);
@@ -313,10 +344,13 @@
             document.getElementById("exec-tab").classList.toggle("bg-gray-100", tab !== "exec");
             document.getElementById("logs-tab").classList.toggle("bg-white", tab === "logs");
             document.getElementById("logs-tab").classList.toggle("bg-gray-100", tab !== "logs");
+            document.getElementById("http-tab").classList.toggle("bg-white", tab === "http");
+            document.getElementById("http-tab").classList.toggle("bg-gray-100", tab !== "http");
 
             // Show/hide content
             document.getElementById("exec-view").classList.toggle("hidden", tab !== "exec");
             document.getElementById("logs-view").classList.toggle("hidden", tab !== "logs");
+            document.getElementById("http-view").classList.toggle("hidden", tab !== "http");
 
             // Handle logs fetching
             if (tab === "logs" && selectedSandbox) {
@@ -324,6 +358,25 @@
             } else {
                 stopLogsFetching();
             }
+
+            // Handle HTTP tab initialization
+            if (tab === "http" && selectedSandbox) {
+                initializeHttpView();
+            }
+        }
+
+        function initializeHttpView() {
+            const urlBar = document.getElementById("url-bar");
+            urlBar.value = "/";
+            navigateIframe();
+        }
+
+        function navigateIframe() {
+            const userPath = document.getElementById("url-bar").value;
+            // Remove leading slash if present to avoid double slashes
+            const cleanPath = userPath.replace(/^\//, '');
+            const fullUrl = `/sandboxes/${selectedSandbox}/proxy/${cleanPath}`;
+            document.getElementById("sandbox-iframe").src = fullUrl;
         }
 
         async function fetchLogs() {
@@ -388,6 +441,28 @@
                 logsAbortController.abort();
                 logsAbortController = null;
             }
+        }
+
+        function handleUrlEnter(event) {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                navigateIframe();
+            }
+        }
+
+        function goBack() {
+            const iframe = document.getElementById("sandbox-iframe");
+            iframe.contentWindow.history.back();
+        }
+
+        function goForward() {
+            const iframe = document.getElementById("sandbox-iframe");
+            iframe.contentWindow.history.forward();
+        }
+
+        function refreshIframe() {
+            const iframe = document.getElementById("sandbox-iframe");
+            iframe.contentWindow.location.reload();
         }
 
         loadSandboxes();
