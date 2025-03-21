@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -124,6 +124,7 @@ async def create_sandbox(request: CreateSandboxRequest):
         }
         return {"id": container.id, "name": container.name, "label": label}
     except Exception as e:
+        print(f'Error starting sandbox:', e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/sandboxes/{sandbox_id}/fork")
@@ -207,6 +208,7 @@ async def coalesce_sandbox(parent_sandbox_id: str, final_sandbox_id: str):
     return {
         "message": f"Sandbox {final_sandbox_id} is now the new root, all other branches have been terminated"
     }
+
 @app.get("/sandboxes/{sandbox_id}")
 async def get_sandbox(sandbox_id: str):
     if sandbox_id not in sandbox_db:
@@ -223,6 +225,36 @@ async def get_sandbox(sandbox_id: str):
             "parent_id": sandbox_db[sandbox_id]["parent_id"],
             "child_ids": sandbox_db[sandbox_id]["child_ids"],
         }
+    except:
+        raise HTTPException(status_code=404, detail="Sandbox not found")
+
+@app.get("/sandboxes/{sandbox_id}/logs")
+async def get_sandbox(sandbox_id: str, stream: bool = False):
+    if sandbox_id not in sandbox_db:
+        raise HTTPException(status_code=404, detail="Sandbox not found")
+    try:
+        container = await engine.get_container(sandbox_id)
+
+        if stream:
+            # Create a cancellation event
+            cancel_event = asyncio.Event()
+            
+            async def stream_response():
+                try:
+                    async for line in await container.logs(stream=True, cancel_event=cancel_event):
+                        yield line + "\n"
+                except asyncio.CancelledError:
+                    # Client disconnected, set the cancel event
+                    cancel_event.set()
+                    raise
+
+            return StreamingResponse(
+                stream_response(),
+                media_type="text/event-stream",
+                background=BackgroundTask(lambda: cancel_event.set())
+            )
+        else:
+            return PlainTextResponse(await container.logs())
     except:
         raise HTTPException(status_code=404, detail="Sandbox not found")
 

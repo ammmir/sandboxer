@@ -24,8 +24,10 @@ class Container:
         self.command = kwargs.get("command", [])
 
     async def exec(self, command: Union[str, List[str]], stream: bool = False) -> Union[Tuple[str, str, int], AsyncIterator[Tuple[str, str, int]]]:
-        """Execute a command inside the container."""
         return await self.engine.exec(self.id, command, stream=stream)
+
+    async def logs(self, stream: bool = False, cancel_event: asyncio.Event = None) -> Union[str, AsyncIterator[str]]:
+        return await self.engine.logs(self.id, stream=stream)
 
     async def stop(self) -> None:
         #await self.engine._run_podman_command(['stop', '--time', '3', self.id])
@@ -139,6 +141,60 @@ class ContainerEngine:
 
         return stdout.decode().strip(), stderr.decode().strip(), exit_code
 
+    async def logs(self, container_id: str, stream: bool = False, cancel_event: asyncio.Event = None) -> Union[str, AsyncIterator[str]]:
+        """
+        Get container logs.
+
+        - `stream=False` (default): Returns all logs as a single string.
+        - `stream=True`: Returns an async iterator yielding log lines as they come.
+        - `cancel_event`: Optional event that when set will stop the streaming.
+        """
+        args = self.podman_path + ['logs']
+        if stream:
+            args.append('-f')
+        args.append(container_id)
+
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT  # Merge stderr into stdout for container logs
+        )
+
+        if stream:
+            async def output_stream() -> AsyncIterator[str]:
+                """Stream log lines as they come."""
+                try:
+                    if process.stdout:
+                        while True:
+                            if cancel_event and cancel_event.is_set():
+                                break
+                            try:
+                                line = await asyncio.wait_for(process.stdout.readline(), timeout=0.1)
+                                if not line:  # EOF
+                                    break
+                                yield line.decode().strip()
+                            except asyncio.TimeoutError:
+                                # Check cancellation more frequently
+                                continue
+                finally:
+                    # Ensure process is terminated and cleaned up
+                    try:
+                        process.terminate()
+                        await asyncio.wait_for(process.wait(), timeout=1.0)
+                    except (asyncio.TimeoutError, ProcessLookupError):
+                        if process.returncode is None:
+                            process.kill()  # Force kill if terminate didn't work
+                            try:
+                                await process.wait()
+                            except ProcessLookupError:
+                                pass  # Process already gone
+
+            return output_stream()
+
+        # Default: Capture all logs and return as a single string
+        stdout, _ = await process.communicate()
+        return stdout.decode().strip()
+
     async def start_container(self, image: str, name: str) -> Container:
         """
         Start a new container using `podman run --rm -d`.
@@ -147,6 +203,7 @@ class ContainerEngine:
         args = [
             'run',
             '--rm',  # Auto-remove container after stopping
+            #'-it',  # Interactive mode with a TTY [disabled: need to implement API]
             '-d',  # Run in detached mode
             '--security-opt', 'seccomp=unconfined',
             '--name', name,  # Container name

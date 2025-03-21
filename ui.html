@@ -20,7 +20,6 @@
 
     <!-- Main Content -->
     <div class="w-3/4 flex flex-col p-4">
-
         <h2 class="text-lg font-semibold">Sandbox Console</h2>
 
         <!-- Sandbox Status Bar -->
@@ -39,16 +38,39 @@
             <button class="float-right font-bold" onclick="hideError()">✖</button>
         </div>
 
-        <!-- Execution Results (like chat) -->
-        <div id="exec-results" class="flex-grow bg-gray-200 p-4 rounded mt-4 overflow-auto h-[60vh]">
-            <p class="text-gray-500">Execution results will appear here.</p>
+        <!-- Tabs -->
+        <div class="flex border-b mt-4">
+            <button id="exec-tab" 
+                    class="px-4 py-2 text-sm font-medium rounded-t-lg bg-white border-t border-l border-r"
+                    onclick="switchTab('exec')">
+                Command Execution
+            </button>
+            <button id="logs-tab" 
+                    class="px-4 py-2 text-sm font-medium rounded-t-lg border-t border-l border-r ml-2 bg-gray-100"
+                    onclick="switchTab('logs')">
+                Logs
+            </button>
         </div>
 
-        <!-- Command Input & Buttons (Fixed at Bottom) -->
-        <div class="bg-white p-4 shadow-md flex items-center gap-2">
-            <textarea id="exec-code" class="border p-2 w-full h-12 resize-none" placeholder="Enter command..."
-                      onkeydown="handleEnter(event)"></textarea>
-            <button class="bg-green-500 text-white px-4 rounded" onclick="executeCode()">▶ Run</button>
+        <!-- Command Execution View -->
+        <div id="exec-view" class="flex-grow flex flex-col">
+            <div id="exec-results" class="flex-grow bg-gray-200 p-4 rounded mt-4 overflow-auto h-[60vh]">
+                <p class="text-gray-500">Execution results will appear here.</p>
+            </div>
+
+            <!-- Command Input & Buttons -->
+            <div class="bg-white p-4 shadow-md flex items-center gap-2">
+                <textarea id="exec-code" class="border p-2 w-full h-12 resize-none" placeholder="Enter command..."
+                          autocorrect="off" spellcheck="false" onkeydown="handleEnter(event)"></textarea>
+                <button class="bg-green-500 text-white px-4 rounded" onclick="executeCode()">▶ Run</button>
+            </div>
+        </div>
+
+        <!-- Logs View -->
+        <div id="logs-view" class="hidden flex-grow flex flex-col">
+            <div id="sandbox-logs" class="flex-grow bg-gray-200 p-4 rounded mt-4 overflow-auto h-[calc(60vh+4rem)]">
+                <p class="text-gray-500">Sandbox logs will appear here.</p>
+            </div>
         </div>
     </div>
 
@@ -71,6 +93,8 @@
 
     <script>
         let selectedSandbox = null;
+        let logsInterval = null;
+        let logsAbortController = null;  // Add AbortController for logs streaming
 
         async function loadSandboxes() {
             try {
@@ -101,6 +125,12 @@
         }
 
         async function selectSandbox(sandboxId) {
+            // Cancel any existing log streams before switching sandboxes
+            if (logsAbortController) {
+                logsAbortController.abort();
+                logsAbortController = null;
+            }
+            
             selectedSandbox = sandboxId;
             try {
                 const response = await fetch(`/sandboxes/${sandboxId}`);
@@ -110,11 +140,18 @@
                 document.getElementById("sandbox-info").innerText = 
                     `📦 ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}] | Status: ${sb.status} | IP: ${sb.ip_address || "N/A"}`;
 
-                // Show action buttons (Stop & Rename)
+                // Show action buttons
                 document.getElementById("sandbox-actions").classList.remove("hidden");
 
                 // Clear execution results when switching sandbox
                 document.getElementById("exec-results").innerHTML = "";
+                
+                // Start fetching logs if we're on the logs tab
+                if (document.getElementById("logs-view").classList.contains("hidden")) {
+                    stopLogsFetching();
+                } else {
+                    startLogsFetching();
+                }
             } catch (error) {
                 showError(error.message);
             }
@@ -269,6 +306,89 @@
 
         function openCreateModal() { document.getElementById("create-modal").classList.remove("hidden"); }
         function closeCreateModal() { document.getElementById("create-modal").classList.add("hidden"); }
+
+        function switchTab(tab) {
+            // Update tab styling
+            document.getElementById("exec-tab").classList.toggle("bg-white", tab === "exec");
+            document.getElementById("exec-tab").classList.toggle("bg-gray-100", tab !== "exec");
+            document.getElementById("logs-tab").classList.toggle("bg-white", tab === "logs");
+            document.getElementById("logs-tab").classList.toggle("bg-gray-100", tab !== "logs");
+
+            // Show/hide content
+            document.getElementById("exec-view").classList.toggle("hidden", tab !== "exec");
+            document.getElementById("logs-view").classList.toggle("hidden", tab !== "logs");
+
+            // Handle logs fetching
+            if (tab === "logs" && selectedSandbox) {
+                startLogsFetching();
+            } else {
+                stopLogsFetching();
+            }
+        }
+
+        async function fetchLogs() {
+            if (!selectedSandbox) return;
+            
+            // Create new AbortController for this stream
+            logsAbortController = new AbortController();
+            
+            try {
+                const response = await fetch(`/sandboxes/${selectedSandbox}/logs?stream=true`, {
+                    signal: logsAbortController.signal
+                });
+                if (!response.ok || !response.body) throw new Error("Failed to stream logs");
+
+                // Create logs container if it doesn't exist
+                const logsContainer = document.getElementById("sandbox-logs");
+                logsContainer.innerHTML = '<pre class="text-sm font-mono whitespace-pre-wrap"></pre>';
+                const preElement = logsContainer.querySelector('pre');
+
+                // Stream processing
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = "";
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+
+                    // Process complete lines
+                    let lines = buffer.split("\n");
+                    buffer = lines.pop() || ""; // Save incomplete line for next read
+
+                    // Append each complete line to the logs
+                    for (let line of lines) {
+                        preElement.innerHTML += `${line}\n`;
+                        // Auto-scroll to bottom
+                        logsContainer.scrollTop = logsContainer.scrollHeight;
+                    }
+                }
+
+                // Handle any remaining buffer
+                if (buffer) {
+                    preElement.innerHTML += buffer;
+                    logsContainer.scrollTop = logsContainer.scrollHeight;
+                }
+            } catch (error) {
+                console.error("Error streaming logs:", error);
+                document.getElementById("sandbox-logs").innerHTML = 
+                    `<p class="text-red-500">Error streaming logs: ${error.message}</p>`;
+            }
+        }
+
+        function startLogsFetching() {
+            stopLogsFetching(); // Clear any existing streams
+            fetchLogs(); // Start streaming
+        }
+
+        function stopLogsFetching() {
+            if (logsAbortController) {
+                logsAbortController.abort();
+                logsAbortController = null;
+            }
+        }
 
         loadSandboxes();
     </script>
