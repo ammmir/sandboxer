@@ -80,6 +80,7 @@ class CreateSandboxRequest(BaseModel):
     image: str
     label: str
     env: dict[str, str] = {}
+    args: list[str] = []
 
 class ForkSandboxRequest(BaseModel):
     label: str
@@ -116,7 +117,7 @@ async def create_sandbox(request: CreateSandboxRequest):
     label = request.label if request.label else container_name
     
     try:
-        container = await engine.start_container(image=request.image, name=container_name, env=request.env)
+        container = await engine.start_container(image=request.image, name=container_name, env=request.env, args=request.args)
         sandbox_db[container.id] = {
             "label": label,
             "last_active_at": time.time(),

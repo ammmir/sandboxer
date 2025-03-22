@@ -195,12 +195,12 @@ class ContainerEngine:
         stdout, _ = await process.communicate()
         return stdout.decode().strip()
 
-    async def start_container(self, image: str, name: str, env: dict[str, str] = None) -> Container:
+    async def start_container(self, image: str, name: str, env: dict[str, str] = None, args: list[str] = None) -> Container:
         """
         Start a new container using `podman run --rm -d`.
         Returns a `Container` object with its assigned IP address.
         """
-        args = [
+        args_list = [
             'run',
             '--rm',  # Auto-remove container after stopping
             #'-it',  # Interactive mode with a TTY [disabled: need to implement API]
@@ -212,11 +212,15 @@ class ContainerEngine:
         # Add environment variables if provided
         if env:
             for key, value in env.items():
-                args.extend(['-e', f'{key}={value}'])
+                args_list.extend(['-e', f'{key}={value}'])
 
-        args.append(f'docker://{image}')  # The image to run
+        args_list.append(f'docker://{image}')  # The image to run
+
+        # Add additional container arguments if provided
+        if args:
+            args_list.extend(args)
         
-        container_id = await self._run_podman_command(args)
+        container_id = await self._run_podman_command(args_list)
         container_ip, exposed_port = await self._get_container_ip(container_id)
 
         return Container(id=container_id, ip_address=container_ip, exposed_port=exposed_port, engine=self)
