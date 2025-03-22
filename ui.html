@@ -113,12 +113,12 @@
             <label class="block mt-2">Container Arguments:</label>
             <textarea id="sandbox-args" 
                      class="border p-2 w-full h-24 font-mono text-sm" 
-                     placeholder="Enter one argument per line&#10;Example:&#10;--workdir /app&#10;--volume /host:/container"></textarea>
+                     placeholder="Enter one argument per line, for example:&#10;redis-server&#10;--loglevel warning&#10;"></textarea>
 
             <label class="block mt-2">Environment Variables:</label>
             <textarea id="sandbox-env" 
                      class="border p-2 w-full h-24 font-mono text-sm" 
-                     placeholder="Enter one environment variable per line in KEY=VALUE format&#10;"></textarea>
+                     placeholder="Enter one environment variable per line, for example:&#10;POSTGRES_USER=foo&#10;POSTGRES_PASSWORD=bar&#10;"></textarea>
 
             <div class="mt-4 flex justify-end">
                 <button class="bg-gray-500 text-white px-4 py-2 mr-2 rounded" onclick="closeCreateModal()">Cancel</button>

@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import uuid
+import io
 
 class Container:
     def __init__(self, engine: 'ContainerEngine', **kwargs):
@@ -275,7 +276,7 @@ class ContainerEngine:
 
     async def snapshot_container(self, container_id: str, image_path: str) -> None:
         await self._run_podman_command([
-            'container', 'checkpoint', '-e', image_path, '--leave-running', '--ignore-volumes', container_id
+            'container', 'checkpoint', '-e', image_path, '--leave-running', '--ignore-volumes', '--tcp-established', '--tcp-skip-in-flight', '--ext-unix-sk', container_id
         ])
 
     async def restore_container(self, image_path: str, name: str) -> Container:
@@ -324,36 +325,53 @@ class ContainerEngine:
         return new_volumes
 
     def _edit_checkpoint(self, snapshot_file: str, volume_map: Dict[str, str], new_volumes: Dict[str, str]) -> None:
-        """Modify the checkpoint tar file in-place by updating volume references."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Extract checkpoint
-            with tarfile.open(snapshot_file, "r:*") as tar:
-                tar.extractall(temp_dir)
-
-            # Perform search & replace for volume IDs in config.dump & spec.dump
-            for file_name in ["config.dump", "spec.dump"]:
-                file_path = os.path.join(temp_dir, file_name)
-
-                with open(file_path, "r") as f:
-                    content = f.read()
-
-                # Replace old volume IDs with new ones
-                for mount_path, old_volume in volume_map.items():
-                    new_volume = new_volumes[mount_path]
-                    content = content.replace(old_volume, new_volume)
-                    content = content.replace(
-                        f"/var/lib/containers/storage/volumes/{old_volume}/_data",
-                        f"/var/lib/containers/storage/volumes/{new_volume}/_data"
-                    )
-
-                with open(file_path, "w") as f:
-                    f.write(content)
-
-            # Overwrite the original tar file with the modified contents
-            with tarfile.open(snapshot_file, "w:gz") as tar:
-                tar.add(temp_dir, arcname=".")
+        """Modify the checkpoint tar file by creating a new one with updated volume references."""
+        temp_output = f"{snapshot_file}.tmp"
+        
+        try:
+            with tarfile.open(snapshot_file, 'r:gz') as input_archive:
+                with tarfile.open(temp_output, 'w:gz') as output_archive:
+                    for member in input_archive.getmembers():
+                        file = input_archive.extractfile(member)
+                        
+                        # If this is one of our target files, modify its contents
+                        if member.name in ["config.dump", "spec.dump"]:
+                            content = file.read().decode('utf-8')
+                            
+                            # Replace volume references
+                            for mount_path, old_volume in volume_map.items():
+                                new_volume = new_volumes[mount_path]
+                                content = content.replace(old_volume, new_volume)
+                                content = content.replace(
+                                    f"/var/lib/containers/storage/volumes/{old_volume}/_data",
+                                    f"/var/lib/containers/storage/volumes/{new_volume}/_data"
+                                )
+                            
+                            # Create a new tarinfo with the same metadata but updated size
+                            new_content = content.encode('utf-8')
+                            new_info = tarfile.TarInfo(member.name)
+                            new_info.size = len(new_content)
+                            new_info.mode = member.mode
+                            new_info.uid = member.uid
+                            new_info.gid = member.gid
+                            new_info.mtime = member.mtime
+                            
+                            # Add modified content to archive
+                            output_archive.addfile(new_info, fileobj=io.BytesIO(new_content))
+                        else:
+                            # For all other files, copy them directly
+                            output_archive.addfile(member, file)
             
-            return snapshot_file
+            # Replace the original file with our modified version
+            os.replace(temp_output, snapshot_file)
+            
+        except Exception as e:
+            # Clean up temp file if something goes wrong
+            if os.path.exists(temp_output):
+                os.unlink(temp_output)
+            raise e
+        
+        return snapshot_file
 
     async def fork_container(self, container_id: str, new_name: str, keep_snapshot: bool = False) -> Tuple[Container, str]:
         """
