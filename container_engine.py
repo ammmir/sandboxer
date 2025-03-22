@@ -195,7 +195,7 @@ class ContainerEngine:
         stdout, _ = await process.communicate()
         return stdout.decode().strip()
 
-    async def start_container(self, image: str, name: str) -> Container:
+    async def start_container(self, image: str, name: str, env: dict[str, str] = None) -> Container:
         """
         Start a new container using `podman run --rm -d`.
         Returns a `Container` object with its assigned IP address.
@@ -207,8 +207,14 @@ class ContainerEngine:
             '-d',  # Run in detached mode
             '--security-opt', 'seccomp=unconfined',
             '--name', name,  # Container name
-            f'docker://{image}'  # The image to run
         ]
+
+        # Add environment variables if provided
+        if env:
+            for key, value in env.items():
+                args.extend(['-e', f'{key}={value}'])
+
+        args.append(f'docker://{image}')  # The image to run
         
         container_id = await self._run_podman_command(args)
         container_ip, exposed_port = await self._get_container_ip(container_id)

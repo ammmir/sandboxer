@@ -79,6 +79,7 @@ app = FastAPI(lifespan=lifespan)
 class CreateSandboxRequest(BaseModel):
     image: str
     label: str
+    env: dict[str, str] = {}
 
 class ForkSandboxRequest(BaseModel):
     label: str
@@ -115,7 +116,7 @@ async def create_sandbox(request: CreateSandboxRequest):
     label = request.label if request.label else container_name
     
     try:
-        container = await engine.start_container(image=request.image, name=container_name)
+        container = await engine.start_container(image=request.image, name=container_name, env=request.env)
         sandbox_db[container.id] = {
             "label": label,
             "last_active_at": time.time(),

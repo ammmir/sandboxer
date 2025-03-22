@@ -110,6 +110,11 @@
             <label class="block mt-2">Label:</label>
             <input type="text" id="sandbox-label" class="border p-2 w-full" placeholder="Sandbox Label">
 
+            <label class="block mt-2">Environment Variables:</label>
+            <textarea id="sandbox-env" 
+                     class="border p-2 w-full h-24 font-mono text-sm" 
+                     placeholder="Enter one environment variable per line in KEY=VALUE format&#10;"></textarea>
+
             <div class="mt-4 flex justify-end">
                 <button class="bg-gray-500 text-white px-4 py-2 mr-2 rounded" onclick="closeCreateModal()">Cancel</button>
                 <button class="bg-blue-500 text-white px-4 py-2 rounded" onclick="createSandbox()">Create</button>
@@ -194,11 +199,27 @@
             const label = document.getElementById('sandbox-label').value.trim();
             if (!image || !label) return showError("Please enter a Docker image and a label.");
 
+            // Parse environment variables
+            const envText = document.getElementById('sandbox-env').value.trim();
+            const env = {};
+            if (envText) {
+                envText.split('\n').forEach(line => {
+                    line = line.trim();
+                    if (line) {
+                        const [key, ...valueParts] = line.split('=');
+                        const value = valueParts.join('='); // Rejoin in case value contains =
+                        if (key && value) {
+                            env[key.trim()] = value.trim();
+                        }
+                    }
+                });
+            }
+
             try {
                 const response = await fetch("/sandboxes", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ image, label })
+                    body: JSON.stringify({ image, label, env })
                 });
 
                 if (!response.ok) throw new Error(await response.text());
