@@ -1,78 +1,108 @@
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, PlainTextResponse, FileResponse, RedirectResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
+from dotenv import load_dotenv
 import asyncio
 import time
 import httpx
 import uuid
-import pickle
 import json
 import os
 import websockets
+import sqlite3
 
 from container_engine import ContainerEngine, Container
 
+load_dotenv()
+
 # configuration
 CONTAINER_PREFIX = "sandbox_"
-SANDBOX_DB_PATH = "sandbox.db"
+DATABASE = os.getenv('DATABASE', 'sandboxer.sqlite')
 IDLE_TIMEOUT = 24*60*60
 CHECK_INTERVAL = 60
 PROXY_TIMEOUT = 30
 
 engine = ContainerEngine()
 hx = httpx.AsyncClient()
-sandbox_db = {}
+
+def init_db():
+    with closing(sqlite3.connect(DATABASE)) as db:
+        # Existing tables
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS sandboxes (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                label TEXT,
+                image TEXT,
+                network TEXT,
+                parent_id TEXT NULL,
+                last_active_at INTEGER,
+                deleted_at INTEGER NULL,
+                delete_reason TEXT NULL,
+                FOREIGN KEY(network) REFERENCES networks(name)
+            )
+        """)
+        
+        # New tables
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL,
+                name TEXT NOT NULL,
+                login TEXT NOT NULL,
+                avatar_url TEXT,
+                access_token TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+        """)
+        
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS networks (
+                name TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        """)
+        
+        # Add indexes
+        db.execute("CREATE INDEX IF NOT EXISTS idx_sandboxes_network ON sandboxes(network)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_networks_user ON networks(user_id)")
+        
+        db.commit()
+
+def get_db():
+    db = sqlite3.connect(DATABASE)
+    db.row_factory = sqlite3.Row
+    return db
 
 async def terminate_idle_sandboxes():
     while True:
         await asyncio.sleep(CHECK_INTERVAL)
         now = time.time()
-
-        for sandbox_id in list(sandbox_db.keys()):
-            last_time = sandbox_db[sandbox_id]["last_active_at"]
-            running = sandbox_db[sandbox_id].get("deleted_at", 0)
-
-            if not running and now - last_time > IDLE_TIMEOUT:
-                print(f"Terminating idle sandbox {sandbox_id} (idle for {now - last_time:.1f} seconds)")
-                try:
-                    container = await engine.get_container(sandbox_id)
-                    await container.stop()
-                    sandbox_db[sandbox_id]["delete_reason"] = "idle"
-                except Exception:
-                    sandbox_db[sandbox_id]["delete_reason"] = "exit"
-                finally:
-                    sandbox_db[sandbox_id]["deleted_at"] = now
-
-def load_db():
-    global sandbox_db
-    if os.path.exists(SANDBOX_DB_PATH):
-        with open(SANDBOX_DB_PATH, "rb") as f:
-            sandbox_db = pickle.load(f)
-
-def save_db():
-    try:
-        with open(f"{SANDBOX_DB_PATH}.tmp", "wb") as f:
-            pickle.dump(sandbox_db, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.rename(f"{SANDBOX_DB_PATH}.tmp", SANDBOX_DB_PATH)
-    except Exception as e:
-        print(f"Failed to save: {e}", file=sys.stderr)
-
-async def periodic_save():
-    while True:
-        save_db()
-        await asyncio.sleep(10)
+        with closing(get_db()) as db:
+            # Mark idle sandboxes as deleted
+            db.execute("UPDATE sandboxes SET deleted_at = ?, delete_reason = 'idle' WHERE deleted_at IS NULL AND ? - last_active_at > ? AND id IN (SELECT id FROM sandboxes)", (now, now, IDLE_TIMEOUT))
+            # Get sandboxes to stop
+            to_stop = db.execute("SELECT id FROM sandboxes WHERE deleted_at = ? AND delete_reason = 'idle'", (now,)).fetchall()
+            db.commit()
+            
+        # Stop containers outside transaction
+        for row in to_stop:
+            try:
+                container = await engine.get_container(row['id'])
+                await container.stop()
+            except Exception:
+                pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    load_db()
+    init_db()
     asyncio.create_task(terminate_idle_sandboxes())
-    asyncio.create_task(periodic_save())
     yield
-    save_db()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -92,258 +122,309 @@ class UpdateSandboxRequest(BaseModel):
     label: str
 
 @app.get("/sandboxes")
-async def get_sandboxes():
+async def get_sandboxes(request: Request):
     sandboxes = []
-    all_containers = await engine.list_containers()
-
-    for container in all_containers:
-        sandbox_data = sandbox_db.get(container.id, {})
-
-        sandboxes.append({
-            "id": container.id,
-            "name": container.name,
-            "status": container.status,
-            "ip_address": container.ip_address,
-            "label": sandbox_data.get("label", ""),
-            "parent_id": sandbox_data.get("parent_id", None),
-            "child_ids": sandbox_data.get("child_ids", []),
-        })
-
+    with closing(get_db()) as db:
+        rows = db.execute("SELECT * FROM sandboxes WHERE network = ? AND deleted_at IS NULL", (request.state.network,)).fetchall()
+        for row in rows:
+            try:
+                container = await engine.get_container(row['id'])
+                sandboxes.append({
+                    "id": row['id'],
+                    "name": container.name,
+                    "status": container.status,
+                    "ip_address": container.ip_address,
+                    "label": row['label'],
+                    "parent_id": row['parent_id'],
+                    "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (row['id'],)).fetchall(),
+                })
+            except Exception as e:
+                print(f'ex: ', e)
+                pass
+            
     return {"sandboxes": sandboxes}
 
 @app.post("/sandboxes")
-async def create_sandbox(request: CreateSandboxRequest):
+async def create_sandbox(request: CreateSandboxRequest, req: Request):
     container_name = CONTAINER_PREFIX + str(uuid.uuid4())[:8]
     label = request.label if request.label else container_name
     
     try:
-        container = await engine.start_container(image=request.image, name=container_name, env=request.env, args=request.args)
-        sandbox_db[container.id] = {
-            "label": label,
-            "last_active_at": time.time(),
-            "image": request.image,
-            "parent_id": None,
-            "child_ids": []
-        }
+        container = await engine.start_container(
+            image=request.image, 
+            name=container_name, 
+            env=request.env, 
+            args=request.args,
+            network=req.state.network
+        )
+        
+        with closing(get_db()) as db:
+            db.execute(
+                "INSERT INTO sandboxes (id, name, label, image, network, parent_id, last_active_at) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+                (container.id, container_name, label, request.image, req.state.network, time.time())
+            )
+            db.commit()
+            
         return {"id": container.id, "name": container.name, "label": label}
     except Exception as e:
         print(f'Error starting sandbox:', e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/sandboxes/{sandbox_id}/fork")
-async def fork_sandbox(sandbox_id: str, request: ForkSandboxRequest):
+async def fork_sandbox(sandbox_id: str, request: ForkSandboxRequest, req: Request):
     """Fork an existing sandbox container."""
-    if sandbox_id not in sandbox_db:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
+    with closing(get_db()) as db:
+        parent = db.execute("SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL", (sandbox_id, req.state.network)).fetchone()
+        if not parent:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
 
-    parent_data = sandbox_db[sandbox_id]
-    child_label = request.label if request.label else f"Fork of {parent_data['label']}"
-
-    try:
-        forked_container, _ = await engine.fork_container(sandbox_id, f"{sandbox_id}-fork-{str(uuid.uuid4())[:8]}")
-        sandbox_db[forked_container.id] = {
-            "label": child_label,
-            "last_active_at": time.time(),
-            "image": parent_data["image"],
-            "parent_id": sandbox_id,
-            "child_ids": [],
-        }
-        sandbox_db[sandbox_id]["child_ids"].append(forked_container.id)
-
-        return {"id": forked_container.id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        child_label = request.label if request.label else f"Fork of {parent['label']}"
+        try:
+            forked_container, _ = await engine.fork_container(
+                sandbox_id, 
+                f"{sandbox_id}-fork-{str(uuid.uuid4())[:8]}"
+            )
+            
+            db.execute(
+                "INSERT INTO sandboxes (id, name, label, image, network, parent_id, last_active_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (forked_container.id, forked_container.name, child_label, parent['image'], req.state.network, sandbox_id, time.time())
+            )
+            db.commit()
+            return {"id": forked_container.id}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/sandboxes/{parent_sandbox_id}/coalesce/{final_sandbox_id}")
-async def coalesce_sandbox(parent_sandbox_id: str, final_sandbox_id: str):
-    """
-    Terminates all sandboxes **in the entire subtree** of parent_sandbox_id,
-    except for final_sandbox_id, which becomes the new root.
-    """
+async def coalesce_sandbox(parent_sandbox_id: str, final_sandbox_id: str, req: Request):
+    with closing(get_db()) as db:
+        # Check both sandboxes exist in user's network
+        parent = db.execute("SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL", 
+            (parent_sandbox_id, req.state.network)).fetchone()
+        final = db.execute("SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (final_sandbox_id, req.state.network)).fetchone()
+            
+        if not parent or not final:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
 
-    if parent_sandbox_id not in sandbox_db:
-        raise HTTPException(status_code=404, detail="Parent sandbox not found")
+        # Recursively collect all descendants of parent
+        def collect_tree_nodes(node_id):
+            nodes = [node_id]
+            children = db.execute("SELECT id FROM sandboxes WHERE parent_id = ? AND deleted_at IS NULL", (node_id,)).fetchall()
+            for child in children:
+                nodes.extend(collect_tree_nodes(child['id']))
+            return nodes
 
-    if final_sandbox_id not in sandbox_db:
-        raise HTTPException(status_code=404, detail="Final sandbox not found")
+        full_tree = collect_tree_nodes(parent_sandbox_id)
+        if final_sandbox_id not in full_tree:
+            raise HTTPException(status_code=400, detail="Final sandbox is not a descendant of the parent sandbox")
 
-    # Ensure final_sandbox_id is actually a descendant of parent_sandbox_id
-    def collect_tree_nodes(node_id):
-        """Recursively collect all sandbox IDs in the tree."""
-        nodes = [node_id]
-        for child_id in sandbox_db[node_id]["child_ids"]:
-            nodes.extend(collect_tree_nodes(child_id))
-        return nodes
+        sandboxes_to_terminate = [sbx_id for sbx_id in full_tree if sbx_id != final_sandbox_id]
+        if not sandboxes_to_terminate:
+            return {"message": "Nothing to coalesce, target is already the root"}
 
-    full_tree = collect_tree_nodes(parent_sandbox_id)
+        now = time.time()
+        # Mark all sandboxes as deleted except final
+        db.execute(
+            "UPDATE sandboxes SET deleted_at = ?, delete_reason = 'coalesced' WHERE id IN ({})".format(','.join(['?'] * len(sandboxes_to_terminate))),
+            [now] + sandboxes_to_terminate
+        )
+        # Make final sandbox the root
+        db.execute("UPDATE sandboxes SET parent_id = NULL WHERE id = ?", (final_sandbox_id,))
+        db.commit()
 
-    if final_sandbox_id not in full_tree:
-        raise HTTPException(status_code=400, detail="Final sandbox is not a descendant of the parent sandbox")
+        # Stop containers outside transaction
+        for sbx_id in sandboxes_to_terminate:
+            try:
+                container = await engine.get_container(sbx_id)
+                if container:
+                    await container.stop()
+            except Exception:
+                pass
 
-    # Remove **only** final_sandbox_id from termination list
-    sandboxes_to_terminate = [sbx_id for sbx_id in full_tree if sbx_id != final_sandbox_id]
-
-    print(f'FULL TREE      : {full_tree}')
-    print(f'TO TERMINATE   : {sandboxes_to_terminate}')
-
-    if not sandboxes_to_terminate:
-        return {"message": "Nothing to coalesce, target is already the root"}
-
-    # Terminate all sandboxes except final_sandbox_id
-    for sbx_id in sandboxes_to_terminate:
-        try:
-            container = await engine.get_container(sbx_id)
-            if container:
-                await container.stop()
-            sandbox_db[sbx_id]["deleted_at"] = time.time()
-        except Exception:
-            sandbox_db[sbx_id]["deleted_at"] = time.time()
-
-    # Remove references to terminated sandboxes from their parents
-    for sbx_id in sandboxes_to_terminate:
-        parent_id = sandbox_db[sbx_id]["parent_id"]
-        if parent_id and parent_id in sandbox_db:
-            sandbox_db[parent_id]["child_ids"].remove(sbx_id)
-
-    # Make final_sandbox_id the **only survivor and root**
-    sandbox_db[final_sandbox_id]["parent_id"] = None
-
-    return {
-        "message": f"Sandbox {final_sandbox_id} is now the new root, all other branches have been terminated"
-    }
+        return {"message": f"Sandbox {final_sandbox_id} is now the new root"}
 
 @app.get("/sandboxes/{sandbox_id}")
-async def get_sandbox(sandbox_id: str):
-    if sandbox_id not in sandbox_db:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
-    try:
-        container = await engine.get_container(sandbox_id)
+async def get_sandbox(sandbox_id: str, req: Request):
+    with closing(get_db()) as db:
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL", 
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
 
-        return {
-            "id": container.id,
-            "name": container.name,
-            "status": container.status,
-            "ip_address": container.ip_address,
-            "label": sandbox_db[sandbox_id]["label"],
-            "parent_id": sandbox_db[sandbox_id]["parent_id"],
-            "child_ids": sandbox_db[sandbox_id]["child_ids"],
-        }
-    except:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
+        try:
+            container = await engine.get_container(sandbox_id)
+            child_ids = [row['id'] for row in db.execute("SELECT id FROM sandboxes WHERE parent_id = ? AND deleted_at IS NULL", (sandbox_id,)).fetchall()]
+            
+            return {
+                "id": container.id,
+                "name": container.name,
+                "status": container.status,
+                "ip_address": container.ip_address,
+                "label": sandbox['label'],
+                "parent_id": sandbox['parent_id'],
+                "child_ids": child_ids,
+            }
+        except:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
 
 @app.get("/sandboxes/{sandbox_id}/logs")
-async def get_sandbox(sandbox_id: str, stream: bool = False):
-    if sandbox_id not in sandbox_db:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
-    try:
-        container = await engine.get_container(sandbox_id)
+async def get_sandbox_logs(req: Request, sandbox_id: str, stream: bool = False):
+    with closing(get_db()) as db:
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
 
-        if stream:
-            # Create a cancellation event
-            cancel_event = asyncio.Event()
-            
-            async def stream_response():
-                try:
-                    async for line in await container.logs(stream=True, cancel_event=cancel_event):
-                        yield line + "\n"
-                except asyncio.CancelledError:
-                    # Client disconnected, set the cancel event
-                    cancel_event.set()
-                    raise
+        try:
+            container = await engine.get_container(sandbox_id)
 
-            return StreamingResponse(
-                stream_response(),
-                media_type="text/event-stream",
-                background=BackgroundTask(lambda: cancel_event.set())
+            # Update last active timestamp
+            db.execute(
+                "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
+                (time.time(), sandbox_id)
             )
-        else:
-            return PlainTextResponse(await container.logs())
-    except:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
+            db.commit()
+
+            if stream:
+                cancel_event = asyncio.Event()
+                
+                async def stream_response():
+                    try:
+                        async for line in await container.logs(stream=True, cancel_event=cancel_event):
+                            yield line + "\n"
+                    except asyncio.CancelledError:
+                        cancel_event.set()
+                        raise
+
+                return StreamingResponse(
+                    stream_response(),
+                    media_type="text/event-stream",
+                    background=BackgroundTask(lambda: cancel_event.set())
+                )
+            else:
+                return PlainTextResponse(await container.logs())
+        except:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
 
 @app.patch("/sandboxes/{sandbox_id}")
-async def update_sandbox_label(sandbox_id: str, request: UpdateSandboxRequest):
+async def update_sandbox_label(sandbox_id: str, request: UpdateSandboxRequest, req: Request):
     if not request.label.strip():
         raise HTTPException(status_code=400, detail="Label cannot be empty.")
-    if sandbox_id not in sandbox_db:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
-    sandbox_db[sandbox_id]["label"] = request.label
-    return {"id": sandbox_id, "label": request.label}
+        
+    with closing(get_db()) as db:
+        result = db.execute(
+            "UPDATE sandboxes SET label = ? WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (request.label, sandbox_id, req.state.network)
+        )
+        db.commit()
+        
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
+            
+        return {"id": sandbox_id, "label": request.label}
 
 @app.get("/sandboxes/{sandbox_id}/tree")
-async def get_sandbox_tree(sandbox_id: str):
-    """Return the fork tree of a sandbox as both formatted text and JSON."""
-    if sandbox_id not in sandbox_db:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
+async def get_sandbox_tree(sandbox_id: str, req: Request):
+    with closing(get_db()) as db:
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
 
-    def build_tree(node_id, prefix="", is_root=False, is_last=True):
-        """Recursively builds the formatted string tree and JSON structure."""
-        node = sandbox_db[node_id]
-        node_label = f"📦 {node['label']} [{node_id}]"
+        def build_tree(node_id, prefix="", is_root=False, is_last=True):
+            node = db.execute("SELECT * FROM sandboxes WHERE id = ?", (node_id,)).fetchone()
+            node_label = f"📦 {node['label']} [{node_id}]"
 
-        # Root node: No connector, just the label
-        if is_root:
-            tree_repr.append(node_label)
-        else:
-            connector = "└── " if is_last else "├── "
-            tree_repr.append(f"{prefix}{connector}{node_label}")
+            if is_root:
+                tree_repr.append(node_label)
+            else:
+                connector = "└── " if is_last else "├── "
+                tree_repr.append(f"{prefix}{connector}{node_label}")
 
-        # Build JSON representation
-        children = sandbox_db[node_id]["child_ids"]
-        tree_json = {"id": node_id, "label": node["label"], "children": []}
+            children = db.execute("SELECT id, label FROM sandboxes WHERE parent_id = ? AND deleted_at IS NULL", (node_id,)).fetchall()
+            tree_json = {"id": node_id, "label": node['label'], "children": []}
 
-        new_prefix = prefix + ("    " if is_last else "│   ")
+            new_prefix = prefix + ("    " if is_last else "│   ")
+            for i, child in enumerate(children):
+                tree_json["children"].append(build_tree(child['id'], new_prefix, False, i == len(children) - 1))
 
-        for i, child_id in enumerate(children):
-            tree_json["children"].append(build_tree(child_id, new_prefix, False, i == len(children) - 1))
+            return tree_json
 
-        return tree_json
+        tree_repr = []
+        tree_json = build_tree(sandbox_id, "", True, True)
 
-    tree_repr = []
-    tree_json = build_tree(sandbox_id, "", True, True)
-
-    return {
-        "tree": "\n".join(tree_repr),  # Pretty-print tree
-        "tree_json": tree_json         # JSON representation
-    }
+        return {
+            "tree": "\n".join(tree_repr),
+            "tree_json": tree_json
+        }
 
 @app.post("/sandboxes/{sandbox_id}/execute")
-async def execute_code(sandbox_id: str, request: ExecuteRequest, stream: bool = False):
+async def execute_code(req: Request, sandbox_id: str, request: ExecuteRequest, stream: bool = False):
     if not request.code.strip():
         raise HTTPException(status_code=400, detail="Code cannot be empty.")
-    if sandbox_id not in sandbox_db:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
+        
+    with closing(get_db()) as db:
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
 
-    try:
-        container = await engine.get_container(sandbox_id)
-        if not container:
-            raise HTTPException(status_code=404, detail="Sandbox container not found")
+        try:
+            container = await engine.get_container(sandbox_id)
+            if not container:
+                raise HTTPException(status_code=404, detail="Sandbox container not found")
 
-        if stream:
-            async def stream_response():
-                async for stream_type, data, exit_code in await container.exec(request.code, stream=True):
-                    yield json.dumps({"type": stream_type, "output": data, "exit_code": exit_code}) + "\n"
+            # Update last active timestamp
+            db.execute(
+                "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
+                (time.time(), sandbox_id)
+            )
+            db.commit()
 
-            return StreamingResponse(stream_response(), media_type="application/x-ndjson")
+            if stream:
+                async def stream_response():
+                    async for stream_type, data, exit_code in await container.exec(request.code, stream=True):
+                        yield json.dumps({"type": stream_type, "output": data, "exit_code": exit_code}) + "\n"
 
-        else:
-            stdout, stderr, exit_code = await container.exec(request.code, stream=False)
-            return {
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": exit_code
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+                return StreamingResponse(stream_response(), media_type="application/x-ndjson")
+            else:
+                stdout, stderr, exit_code = await container.exec(request.code, stream=False)
+                return {
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_code": exit_code
+                }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.api_route("/sandboxes/{sandbox_id}/proxy/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
 async def proxy_request(sandbox_id: str, path: str, request: Request):
-    """Proxies HTTP requests into the correct sandbox using its private IP and exposed port."""
-    if sandbox_id not in sandbox_db:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
+    with closing(get_db()) as db:
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND deleted_at IS NULL",
+            (sandbox_id, )
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
+
+        # Update last active timestamp
+        db.execute(
+            "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
+            (time.time(), sandbox_id)
+        )
+        db.commit()
 
     container = await engine.get_container(sandbox_id)
     if not container or not container.ip_address or not container.exposed_port:
+        print(f'container ip: {container.ip_address} port: {container.exposed_port}')
         raise HTTPException(status_code=500, detail="Sandbox container is missing network info")
 
     sandbox_url = f"http://{container.ip_address}:{container.exposed_port}/{path}"
@@ -414,31 +495,54 @@ async def proxy_request(sandbox_id: str, path: str, request: Request):
         raise HTTPException(status_code=502, detail="Sandbox connection failed")
 
 @app.delete("/sandboxes/{sandbox_id}")
-async def delete_sandbox(sandbox_id: str):
-    if sandbox_id not in sandbox_db:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
+async def delete_sandbox(sandbox_id: str, req: Request):
+    with closing(get_db()) as db:
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
 
-    container = await engine.get_container(sandbox_id)
-    if not container:
-        raise HTTPException(status_code=404, detail="Sandbox not found")
-
-    await container.stop()
-    parent_id = sandbox_db[sandbox_id]["parent_id"]
-    if parent_id and parent_id in sandbox_db:
-        sandbox_db[parent_id]["child_ids"].remove(sandbox_id)
-    sandbox_db[sandbox_id]["deleted_at"] = time.time()
-    return {"message": f"Sandbox {sandbox_id} deleted"}
+        try:
+            container = await engine.get_container(sandbox_id)
+            if container:
+                await container.stop()
+            
+            db.execute(
+                "UPDATE sandboxes SET deleted_at = ?, delete_reason = 'user_deleted' WHERE id = ?",
+                (time.time(), sandbox_id)
+            )
+            db.commit()
+            
+            return {"message": f"Sandbox {sandbox_id} deleted"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
-async def serve_ui():
-    return FileResponse("ui.html")
+async def serve_ui(request: Request):
+    if request.session.get("user_id"):
+        return FileResponse("ui.html")
+    else:
+        return FileResponse("login.html")
 
 @app.websocket("/sandboxes/{sandbox_id}/proxy/{path:path}")
 async def proxy_websocket(websocket: WebSocket, sandbox_id: str, path: str):
-    """Proxies WebSocket connections into the sandbox."""
-    if sandbox_id not in sandbox_db:
-        await websocket.close(code=4004, reason="Sandbox not found")
-        return
+    with closing(get_db()) as db:
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND deleted_at IS NULL",
+            (sandbox_id, )
+        ).fetchone()
+        if not sandbox:
+            await websocket.close(code=4004, reason="Sandbox not found")
+            return
+
+        # Update last active timestamp
+        db.execute(
+            "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
+            (time.time(), sandbox_id)
+        )
+        db.commit()
 
     container = await engine.get_container(sandbox_id)
     if not container or not container.ip_address or not container.exposed_port:
@@ -543,6 +647,7 @@ async def proxy_websocket(websocket: WebSocket, sandbox_id: str, path: str):
             await websocket.close(code=4007, reason="Internal proxy error")
         except Exception:
             pass  # Connection might already be closed
+
 
 if __name__ == "__main__":
     import uvicorn

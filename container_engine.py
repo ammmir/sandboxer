@@ -196,7 +196,21 @@ class ContainerEngine:
         stdout, _ = await process.communicate()
         return stdout.decode().strip()
 
-    async def start_container(self, image: str, name: str, env: dict[str, str] = None, args: list[str] = None) -> Container:
+    async def create_network(self, name: str) -> str:
+        """Create a new Podman network and return its name."""
+        await self._run_podman_command(['network', 'create', name])
+        return name
+
+    async def remove_network(self, name: str) -> None:
+        """Remove a Podman network by name."""
+        await self._run_podman_command(['network', 'remove', name])
+
+    async def inspect_network(self, name: str) -> dict:
+        """Inspect a Podman network and return its details."""
+        output = await self._run_podman_command(['network', 'inspect', name])
+        return json.loads(output)[0]
+
+    async def start_container(self, image: str, name: str, env: dict[str, str] = None, args: list[str] = None, network: str = None) -> Container:
         """
         Start a new container using `podman run --rm -d`.
         Returns a `Container` object with its assigned IP address.
@@ -209,6 +223,10 @@ class ContainerEngine:
             '--security-opt', 'seccomp=unconfined',
             '--name', name,  # Container name
         ]
+
+        # Add network if specified
+        if network:
+            args_list.extend(['--network', network])
 
         # Add environment variables if provided
         if env:
@@ -231,7 +249,14 @@ class ContainerEngine:
         output = await self._run_podman_command(['inspect', container_id])
         container_info = json.loads(output)[0]
 
+        # First try the default network IP address
         ip_address = container_info["NetworkSettings"]["IPAddress"]
+        
+        # If IP is empty and there are networks, get the first network's IP
+        if not ip_address and container_info["NetworkSettings"]["Networks"]:
+            # Get the first network's IP address
+            first_network = next(iter(container_info["NetworkSettings"]["Networks"].values()))
+            ip_address = first_network.get("IPAddress", "")
         
         # Extract the first exposed port (even if its value is null)
         ports = container_info["NetworkSettings"]["Ports"]
@@ -246,6 +271,15 @@ class ContainerEngine:
             output = await self._run_podman_command(['inspect', container_id])
             data = json.loads(output)[0]
 
+            # First try the default network IP address
+            ip_address = data["NetworkSettings"]["IPAddress"]
+            
+            # If IP is empty and there are networks, get the first network's IP
+            if not ip_address and data["NetworkSettings"]["Networks"]:
+                # Get the first network's IP address
+                first_network = next(iter(data["NetworkSettings"]["Networks"].values()))
+                ip_address = first_network.get("IPAddress", "")
+
             # Extract the first exposed port (even if its value is null)
             ports = data["NetworkSettings"]["Ports"]
             first_exposed_port = next(iter(ports.keys()), None) if ports else None
@@ -254,7 +288,7 @@ class ContainerEngine:
             return Container(
                 engine=self,
                 id=data["Id"],
-                ip_address=data['NetworkSettings']['IPAddress'],
+                ip_address=ip_address,
                 exposed_port=first_exposed_port,
                 name=data.get("Name", "").lstrip("/"),
                 state=data.get("State", "unknown"),
