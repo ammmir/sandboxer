@@ -67,10 +67,37 @@ def init_db():
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
         """)
+
+        # Command executions table
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS command_executions (
+                id TEXT PRIMARY KEY,
+                sandbox_id TEXT NOT NULL,
+                command TEXT NOT NULL,
+                exit_code INTEGER NOT NULL,
+                executed_at INTEGER NOT NULL,
+                FOREIGN KEY(sandbox_id) REFERENCES sandboxes(id)
+            )
+        """)
+
+        # Command execution logs table with autoincrementing sequence
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS command_execution_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                execution_id TEXT NOT NULL,
+                fd INTEGER NOT NULL,  -- 1 for stdout, 2 for stderr
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(execution_id) REFERENCES command_executions(id)
+            )
+        """)
         
         # Add indexes
         db.execute("CREATE INDEX IF NOT EXISTS idx_sandboxes_network ON sandboxes(network)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_networks_user ON networks(user_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_command_executions_sandbox ON command_executions(sandbox_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_command_execution_logs_execution ON command_execution_logs(execution_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_command_execution_logs_created ON command_execution_logs(created_at)")
         
         db.commit()
 
@@ -94,7 +121,8 @@ async def terminate_idle_sandboxes():
         for row in to_stop:
             try:
                 container = await engine.get_container(row['id'])
-                await container.stop()
+                if container:
+                    await container.stop()
             except Exception:
                 pass
 
@@ -127,8 +155,8 @@ async def get_sandboxes(request: Request):
     with closing(get_db()) as db:
         rows = db.execute("SELECT * FROM sandboxes WHERE network = ? AND deleted_at IS NULL", (request.state.network,)).fetchall()
         for row in rows:
-            try:
-                container = await engine.get_container(row['id'])
+            container = await engine.get_container(row['id'])
+            if container:
                 sandboxes.append({
                     "id": row['id'],
                     "name": container.name,
@@ -138,9 +166,8 @@ async def get_sandboxes(request: Request):
                     "parent_id": row['parent_id'],
                     "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (row['id'],)).fetchall(),
                 })
-            except Exception as e:
-                print(f'ex: ', e)
-                pass
+            else:
+                print(f'dead container: {row['id']}')
             
     return {"sandboxes": sandboxes}
 
@@ -310,6 +337,59 @@ async def get_sandbox_logs(req: Request, sandbox_id: str, stream: bool = False):
         except:
             raise HTTPException(status_code=404, detail="Sandbox not found")
 
+@app.get("/sandboxes/{sandbox_id}/execution-logs")
+async def get_all_sandbox_logs(sandbox_id: str, req: Request, limit: int = 1000):
+    """Get all logs for a sandbox, including command execution logs."""
+    with closing(get_db()) as db:
+        # Verify sandbox exists and belongs to user's network
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
+
+        # Get all command executions and their logs
+        logs = db.execute("""
+            SELECT 
+                ce.id as execution_id,
+                ce.command,
+                ce.executed_at,
+                ce.exit_code,
+                cel.id as log_id,
+                cel.fd,
+                cel.content,
+                cel.created_at
+            FROM command_executions ce
+            LEFT JOIN command_execution_logs cel ON ce.id = cel.execution_id
+            WHERE ce.sandbox_id = ?
+            ORDER BY ce.executed_at ASC, cel.id ASC
+            LIMIT ?
+        """, (sandbox_id, limit)).fetchall()
+
+        # Group logs by execution
+        executions = {}
+        for log in logs:
+            if log['execution_id'] not in executions:
+                executions[log['execution_id']] = {
+                    "id": log['execution_id'],
+                    "command": log['command'],
+                    "executed_at": log['executed_at'],
+                    "exit_code": log['exit_code'],
+                    "logs": []
+                }
+            if log['log_id']:  # Only add if there are actual logs
+                executions[log['execution_id']]["logs"].append({
+                    "id": log['log_id'],
+                    "fd": log['fd'],  # 1=stdout, 2=stderr
+                    "content": log['content'],
+                    "created_at": log['created_at']
+                })
+
+        return {
+            "executions": list(executions.values())
+        }
+
 @app.patch("/sandboxes/{sandbox_id}")
 async def update_sandbox_label(sandbox_id: str, request: UpdateSandboxRequest, req: Request):
     if not request.label.strip():
@@ -369,7 +449,8 @@ async def execute_code(req: Request, sandbox_id: str, request: ExecuteRequest, s
     if not request.code.strip():
         raise HTTPException(status_code=400, detail="Code cannot be empty.")
         
-    with closing(get_db()) as db:
+    db = get_db()  # Get a database connection that we'll manage ourselves
+    try:
         sandbox = db.execute(
             "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
             (sandbox_id, req.state.network)
@@ -390,13 +471,108 @@ async def execute_code(req: Request, sandbox_id: str, request: ExecuteRequest, s
             db.commit()
 
             if stream:
+                # Create command execution record
+                execution_id = str(uuid.uuid4())
+                db.execute("""
+                    INSERT INTO command_executions (id, sandbox_id, command, exit_code, executed_at)
+                    VALUES (?, ?, ?, 0, ?)
+                """, (execution_id, sandbox_id, request.code, time.time()))
+                db.commit()
+
+                # Buffer for accumulating lines
+                buffer = []
+                last_flush = time.time()
+                FLUSH_INTERVAL = 5  # seconds
+                MAX_BUFFER_SIZE = 50  # lines
+
                 async def stream_response():
-                    async for stream_type, data, exit_code in await container.exec(request.code, stream=True):
-                        yield json.dumps({"type": stream_type, "output": data, "exit_code": exit_code}) + "\n"
+                    nonlocal buffer, last_flush
+                    
+                    async def flush_buffer():
+                        nonlocal buffer, last_flush
+                        if not buffer:
+                            return
+                            
+                        # Group lines by fd
+                        fd_lines = {1: [], 2: []}  # 1=stdout, 2=stderr
+                        for line in buffer:
+                            if line.startswith("stdout:"):
+                                fd_lines[1].append(line[7:])  # Remove "stdout:" prefix
+                            elif line.startswith("stderr:"):
+                                fd_lines[2].append(line[7:])  # Remove "stderr:" prefix
+                        
+                        # Insert chunks for each fd
+                        for fd, lines in fd_lines.items():
+                            if lines:
+                                content = "\n".join(lines)
+                                db.execute("""
+                                    INSERT INTO command_execution_logs (execution_id, fd, content, created_at)
+                                    VALUES (?, ?, ?, ?)
+                                """, (execution_id, fd, content, time.time()))
+                        
+                        db.commit()
+                        buffer = []
+                        last_flush = time.time()
+
+                    try:
+                        async for stream_type, data, exit_code in await container.exec(request.code, stream=True):
+                            # Add to buffer
+                            buffer.append(f"{stream_type}:{data}")
+                            
+                            # Check if we should flush
+                            if len(buffer) >= MAX_BUFFER_SIZE or time.time() - last_flush >= FLUSH_INTERVAL:
+                                await flush_buffer()
+                            
+                            # Yield the current line
+                            yield json.dumps({"type": stream_type, "output": data, "exit_code": exit_code}) + "\n"
+                        
+                        # Flush any remaining buffer
+                        if buffer:
+                            await flush_buffer()
+                            
+                        # Update exit code
+                        db.execute("""
+                            UPDATE command_executions 
+                            SET exit_code = ? 
+                            WHERE id = ?
+                        """, (exit_code, execution_id))
+                        db.commit()
+                            
+                    except Exception as e:
+                        # Ensure we flush buffer even on error
+                        if buffer:
+                            await flush_buffer()
+                        raise e
+                    finally:
+                        # Close the database connection when we're done streaming
+                        db.close()
 
                 return StreamingResponse(stream_response(), media_type="application/x-ndjson")
             else:
                 stdout, stderr, exit_code = await container.exec(request.code, stream=False)
+                
+                # Create command execution record
+                execution_id = str(uuid.uuid4())
+                db.execute("""
+                    INSERT INTO command_executions (id, sandbox_id, command, exit_code, executed_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (execution_id, sandbox_id, request.code, exit_code, time.time()))
+                
+                # Insert stdout and stderr as separate chunks
+                if stdout:
+                    db.execute("""
+                        INSERT INTO command_execution_logs (execution_id, fd, content, created_at)
+                        VALUES (?, 1, ?, ?)
+                    """, (execution_id, stdout, time.time()))
+                
+                if stderr:
+                    db.execute("""
+                        INSERT INTO command_execution_logs (execution_id, fd, content, created_at)
+                        VALUES (?, 2, ?, ?)
+                    """, (execution_id, stderr, time.time()))
+                
+                db.commit()
+                
                 return {
                     "stdout": stdout,
                     "stderr": stderr,
@@ -404,6 +580,13 @@ async def execute_code(req: Request, sandbox_id: str, request: ExecuteRequest, s
                 }
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            if not stream:  # Only close if we're not streaming
+                db.close()
+    except Exception as e:
+        if 'db' in locals():
+            db.close()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.api_route("/sandboxes/{sandbox_id}/proxy/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
 async def proxy_request(sandbox_id: str, path: str, request: Request):
@@ -648,6 +831,112 @@ async def proxy_websocket(websocket: WebSocket, sandbox_id: str, path: str):
         except Exception:
             pass  # Connection might already be closed
 
+@app.get("/sandboxes/{sandbox_id}/command-executions/{execution_id}/logs")
+async def get_command_execution_logs(sandbox_id: str, execution_id: str, req: Request, start_id: int = 0, limit: int = 100):
+    """Get logs for a specific command execution, starting from a specific log ID."""
+    with closing(get_db()) as db:
+        # Verify sandbox exists and belongs to user's network
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
+
+        # Verify command execution exists and belongs to this sandbox
+        execution = db.execute("""
+            SELECT * FROM command_executions 
+            WHERE id = ? AND sandbox_id = ?
+        """, (execution_id, sandbox_id)).fetchone()
+        if not execution:
+            raise HTTPException(status_code=404, detail="Command execution not found")
+
+        # Get log chunks
+        logs = db.execute("""
+            SELECT id, fd, content, created_at
+            FROM command_execution_logs
+            WHERE execution_id = ? AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+        """, (execution_id, start_id, limit)).fetchall()
+
+        return {
+            "execution": {
+                "id": execution["id"],
+                "command": execution["command"],
+                "exit_code": execution["exit_code"],
+                "executed_at": execution["executed_at"]
+            },
+            "logs": [
+                {
+                    "id": log["id"],
+                    "fd": log["fd"],  # 1=stdout, 2=stderr
+                    "content": log["content"],
+                    "created_at": log["created_at"]
+                }
+                for log in logs
+            ]
+        }
+
+@app.get("/sandboxes/{sandbox_id}/command-executions")
+async def get_sandbox_command_executions(sandbox_id: str, req: Request, limit: int = 100):
+    """Get all command executions for a sandbox."""
+    with closing(get_db()) as db:
+        # Verify sandbox exists and belongs to user's network
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
+
+        # Get command executions with their logs
+        executions = db.execute("""
+            SELECT 
+                ce.id,
+                ce.command,
+                ce.exit_code,
+                ce.executed_at,
+                GROUP_CONCAT(
+                    json_object(
+                        'id', cel.id,
+                        'fd', cel.fd,
+                        'content', cel.content,
+                        'created_at', cel.created_at
+                    )
+                ) as logs
+            FROM command_executions ce
+            LEFT JOIN command_execution_logs cel ON ce.id = cel.execution_id
+            WHERE ce.sandbox_id = ?
+            GROUP BY ce.id
+            ORDER BY ce.executed_at DESC
+            LIMIT ?
+        """, (sandbox_id, limit)).fetchall()
+
+        # Process the results
+        result = []
+        for execution in executions:
+            logs = []
+            if execution['logs']:
+                # Parse the concatenated JSON strings
+                for log_json in execution['logs'].split(','):
+                    log = json.loads(log_json)
+                    logs.append({
+                        "id": log["id"],
+                        "fd": log["fd"],
+                        "content": log["content"],
+                        "created_at": log["created_at"]
+                    })
+
+            result.append({
+                "id": execution["id"],
+                "command": execution["command"],
+                "exit_code": execution["exit_code"],
+                "executed_at": execution["executed_at"],
+                "logs": logs
+            })
+
+        return {"executions": result}
 
 if __name__ == "__main__":
     import uvicorn

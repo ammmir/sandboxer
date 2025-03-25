@@ -207,14 +207,12 @@
                 // Show action buttons
                 document.getElementById("sandbox-actions").classList.remove("hidden");
 
-                // Clear execution results when switching sandbox
-                document.getElementById("exec-results").innerHTML = "";
+                // Load historical command executions
+                await loadCommandExecutions();
                 
                 // Start fetching logs if we're on the logs tab
-                if (document.getElementById("logs-view").classList.contains("hidden")) {
-                    stopLogsFetching();
-                } else {
-                    startLogsFetching();
+                if (!document.getElementById("logs-view").classList.contains("hidden")) {
+                    await loadInitialLogs();
                 }
 
                 // Initialize HTTP view if we're on the HTTP tab
@@ -223,6 +221,56 @@
                 }
             } catch (error) {
                 showError(error.message);
+            }
+        }
+
+        async function loadCommandExecutions() {
+            if (!selectedSandbox) return;
+            
+            try {
+                const response = await fetch(`/sandboxes/${selectedSandbox}/execution-logs`);
+                if (!response.ok) throw new Error("Failed to fetch command executions");
+                const data = await response.json();
+                
+                const resultsContainer = document.getElementById("exec-results");
+                resultsContainer.innerHTML = ''; // Clear existing content
+                
+                // Display executions in chronological order (newest first)
+                for (const execution of data.executions) {
+                    // Create a new result div for this execution
+                    const resultDiv = document.createElement("pre");
+                    resultDiv.classList = "bg-black text-green-400 text-wrap p-2 rounded shadow my-2 overflow-auto";
+                    
+                    // Add command header
+                    resultDiv.textContent = `> ${execution.command}`;
+                    
+                    // Add logs for this execution
+                    for (const log of execution.logs) {
+                        const logLine = document.createElement("div");
+                        logLine.className = log.fd === 2 ? "text-red-500" : "text-green-500";
+                        logLine.textContent = log.content;
+                        resultDiv.appendChild(logLine);
+                    }
+                    
+                    // Add exit code if available
+                    if (execution.exit_code != 0) {
+                        const exitLine = document.createElement("div");
+                        //exitLine.className = "text-yellow-500";
+                        exitLine.textContent = `🛑 Process exited with code ${execution.exit_code}`;
+                        resultDiv.appendChild(exitLine);
+                    }
+                    
+                    resultsContainer.appendChild(resultDiv);
+                }
+                
+                // Scroll to bottom
+                setTimeout(function() {
+                    resultsContainer.scrollTop = resultsContainer.scrollHeight;
+                }, 10);
+            } catch (error) {
+                console.error("Error loading command executions:", error);
+                document.getElementById("exec-results").innerHTML = 
+                    `<div class="text-red-500">Error loading command executions: ${error.message}</div>`;
             }
         }
 
@@ -395,8 +443,8 @@
                             if (data.type === "stdout" || data.type === "stderr") {
                                 // Append text safely
                                 resultDiv.appendChild(document.createTextNode("\n" + data.output));
-                            } else if (data.type === "exit") {
-                                //resultDiv.innerHTML += `\n🛑 ${data.output}`;
+                            } else if (data.type === "exit" && data.exit_code != 0) {
+                                resultDiv.innerHTML += `\n🛑 ${data.output}`;
                             }
                         } catch (err) {
                             console.warn("Error parsing streamed JSON:", line, err);
