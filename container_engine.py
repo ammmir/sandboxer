@@ -198,7 +198,7 @@ class ContainerEngine:
 
     async def create_network(self, name: str) -> str:
         """Create a new Podman network and return its name."""
-        await self._run_podman_command(['network', 'create', name])
+        await self._run_podman_command(['network', 'create', '-o', 'isolate=true', name])
         return name
 
     async def remove_network(self, name: str) -> None:
