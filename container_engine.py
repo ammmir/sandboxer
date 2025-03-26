@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import uuid
 import io
+import re
 
 class Container:
     def __init__(self, engine: 'ContainerEngine', **kwargs):
@@ -407,6 +408,44 @@ class ContainerEngine:
         
         return snapshot_file
 
+    async def _copy_and_modify_container_files(self, parent_id: str, new_id: str) -> None:
+        """
+        Copy and modify container-specific files from parent to new container.
+        This includes /etc/hosts, /etc/resolv.conf, and /etc/hostname.
+        """
+        # Get the userdata paths for both containers
+        parent_path = f"/var/run/containers/storage/overlay-containers/{parent_id}/userdata"
+        new_path = f"/var/run/containers/storage/overlay-containers/{new_id}/userdata"
+
+        # Get the new container's hostname and IPs
+        new_hostname = await self._run_podman_command(['inspect', new_id, '--format', '{{.Config.Hostname}}'])
+        new_ip, _ = await self._get_container_ip(new_id)
+        parent_ip, _ = await self._get_container_ip(parent_id)
+
+        # Copy and modify hosts file
+        with open(f"{parent_path}/hosts", 'r') as f:
+            hosts_content = f.read()
+
+        # Replace the parent container's hostname
+        hosts_content = hosts_content.replace(parent_id[:12], new_id[:12])
+
+        # Replace parent IP with new IP (equivalent to s/{parent_ip}\s+/{new_ip} /g)
+        hosts_content = re.sub(f'{parent_ip}\\s+', f'{new_ip}\t', hosts_content)
+
+        with open(f"{new_path}/hosts", 'w') as f:
+            f.write(hosts_content)
+
+        # Copy resolv.conf as is
+        shutil.copy2(f"{parent_path}/resolv.conf", f"{new_path}/resolv.conf")
+
+        # TODO: hostname needs to be changed at the UTS level or in the CRIU snapshot
+        # XXX: running programs may already have called gethostname() so it's pointless
+        # XXX: Podman's container state will be out of sync
+
+        # Copy and modify hostname file
+        with open(f"{new_path}/hostname", 'w') as f:
+            f.write(new_hostname)
+
     async def fork_container(self, container_id: str, new_name: str, keep_snapshot: bool = False) -> Tuple[Container, str]:
         """
         Forks a running container by:
@@ -414,6 +453,7 @@ class ContainerEngine:
         2. Duplicating volumes
         3. Editing the checkpoint metadata
         4. Restoring the container with new volumes
+        5. Copying and modifying container-specific files
 
         Returns:
         - A tuple containing:
@@ -440,6 +480,9 @@ class ContainerEngine:
         restored_id = await self._run_podman_command(['container', 'restore', '-i', modified_snapshot, '--ignore-volumes', '-n', new_name])
 
         container_ip = await self._get_container_ip(restored_id)
+
+        # Step 6: Copy and modify container-specific files
+        await self._copy_and_modify_container_files(container_id, restored_id)
 
         # Delete snapshot if requested
         if not keep_snapshot:
