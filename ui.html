@@ -11,10 +11,14 @@
     <!-- Sidebar -->
     <div class="w-1/4 bg-white shadow-md p-4 flex flex-col">
         <h2 class="text-lg font-semibold mb-2">Sandboxes</h2>
-        <button class="bg-blue-500 text-white px-4 py-2 rounded mb-4 w-full"
+        <button class="bg-blue-500 text-white px-4 py-2 rounded mb-2 w-full"
                 onclick="openCreateModal()">
             ➕ Create Sandbox
         </button>
+        <label class="flex items-center text-sm text-gray-600 mb-4">
+            <input type="checkbox" id="show-dead" class="mr-2" onchange="toggleDeadSandboxes()">
+            Show terminated sandboxes
+        </label>
         <ul id="sandbox-tree" class="space-y-2 flex-grow overflow-auto"></ul>
         
         <!-- Add user info section at bottom -->
@@ -159,6 +163,7 @@
         let selectedSandbox = null;
         let logsInterval = null;
         let logsAbortController = null;  // Add AbortController for logs streaming
+        let showDeadSandboxes = false;  // Add this at the top with other global variables
 
         async function loadSandboxes() {
             try {
@@ -171,14 +176,55 @@
             }
         }
 
+        function toggleDeadSandboxes() {
+            showDeadSandboxes = document.getElementById("show-dead").checked;
+            loadSandboxes();
+        }
+
+        function hasActiveChildren(sandbox, allSandboxes) {
+            // Check if this sandbox has any active children
+            if (sandbox.child_ids && sandbox.child_ids.length > 0) {
+                for (const childId of sandbox.child_ids) {
+                    const child = allSandboxes.find(s => s.id === childId.id);
+                    if (child) {
+                        // If child is active or has active children, return true
+                        if (child.status !== "terminated" || hasActiveChildren(child, allSandboxes)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        function shouldShowSandbox(sandbox, allSandboxes) {
+            // Always show if showDeadSandboxes is true
+            if (showDeadSandboxes) return true;
+            
+            // Show if sandbox is not terminated
+            if (sandbox.status !== "terminated") return true;
+            
+            // Show if sandbox has active children
+            return hasActiveChildren(sandbox, allSandboxes);
+        }
+
         function renderTree(sandboxes, parentId = null) {
             let html = "";
             sandboxes.forEach(sb => {
                 if (sb.parent_id === parentId) {
+                    // Skip if we shouldn't show this sandbox
+                    if (!shouldShowSandbox(sb, sandboxes)) {
+                        return;
+                    }
+                    
+                    const isTerminated = sb.status === "terminated";
+                    const statusColor = isTerminated ? "text-red-500" : "text-blue-500";
+                    const statusIcon = isTerminated ? "💀" : "📦";
+                    
                     html += `
                         <li class="pl-4">
-                            <button class="text-blue-500 font-semibold" onclick="selectSandbox('${sb.id}')">
-                                📦 ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}]
+                            <button class="${statusColor} font-semibold" onclick="selectSandbox('${sb.id}')">
+                                ${statusIcon} ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}]
                             </button>
                             <ul>${renderTree(sandboxes, sb.id)}</ul>
                         </li>
@@ -201,18 +247,50 @@
                 if (!response.ok) throw new Error("Failed to fetch sandbox details.");
                 const sb = await response.json();
 
-                document.getElementById("sandbox-info").innerText = 
-                    `📦 ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}] | Status: ${sb.status} | IP: ${sb.ip_address || "N/A"}`;
+                const isTerminated = sb.status === "terminated";
+                const statusColor = isTerminated ? "text-red-500" : "text-gray-800";
+                
+                document.getElementById("sandbox-info").innerHTML = 
+                    `📦 ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}] | <span class="${statusColor}">Status: ${sb.status}</span> | IP: ${sb.ip_address || "N/A"}`;
 
-                // Show action buttons
-                document.getElementById("sandbox-actions").classList.remove("hidden");
+                // Show action buttons but disable them if terminated
+                const actionsDiv = document.getElementById("sandbox-actions");
+                actionsDiv.classList.remove("hidden");
+                
+                // Update button states
+                const buttons = actionsDiv.querySelectorAll("button");
+                buttons.forEach(button => {
+                    if (isTerminated) {
+                        button.disabled = true;
+                        button.classList.add("opacity-50", "cursor-not-allowed");
+                    } else {
+                        button.disabled = false;
+                        button.classList.remove("opacity-50", "cursor-not-allowed");
+                    }
+                });
+
+                // Disable command execution controls if terminated
+                const execCode = document.getElementById("exec-code");
+                const runButton = document.querySelector("button[onclick='executeCode()']");
+                if (isTerminated) {
+                    execCode.disabled = true;
+                    execCode.classList.add("bg-gray-100", "cursor-not-allowed");
+                    runButton.disabled = true;
+                    runButton.classList.add("opacity-50", "cursor-not-allowed");
+                } else {
+                    execCode.disabled = false;
+                    execCode.classList.remove("bg-gray-100", "cursor-not-allowed");
+                    runButton.disabled = false;
+                    runButton.classList.remove("opacity-50", "cursor-not-allowed");
+                }
 
                 // Load historical command executions
                 await loadCommandExecutions();
                 
                 // Start fetching logs if we're on the logs tab
                 if (!document.getElementById("logs-view").classList.contains("hidden")) {
-                    await loadInitialLogs();
+                    stopLogsFetching();
+                    startLogsFetching();
                 }
 
                 // Initialize HTTP view if we're on the HTTP tab

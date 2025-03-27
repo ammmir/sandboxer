@@ -213,13 +213,11 @@ class ContainerEngine:
 
     async def start_container(self, image: str, name: str, env: dict[str, str] = None, args: list[str] = None, network: str = None) -> Container:
         """
-        Start a new container using `podman run --rm -d`.
+        Start a new container using `podman run -d`.
         Returns a `Container` object with its assigned IP address.
         """
         args_list = [
             'run',
-            '--rm',  # Auto-remove container after stopping
-            #'-it',  # Interactive mode with a TTY [disabled: need to implement API]
             '-d',  # Run in detached mode
             '--security-opt', 'seccomp=unconfined',
             '--name', name,  # Container name

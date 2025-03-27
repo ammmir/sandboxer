@@ -153,21 +153,34 @@ class UpdateSandboxRequest(BaseModel):
 async def get_sandboxes(request: Request):
     sandboxes = []
     with closing(get_db()) as db:
-        rows = db.execute("SELECT * FROM sandboxes WHERE network = ? AND deleted_at IS NULL", (request.state.network,)).fetchall()
+        rows = db.execute("SELECT * FROM sandboxes WHERE network = ?", (request.state.network,)).fetchall()
         for row in rows:
             container = await engine.get_container(row['id'])
             if container:
                 sandboxes.append({
                     "id": row['id'],
                     "name": container.name,
-                    "status": container.status,
+                    "status": "terminated" if row['deleted_at'] else container.status,
                     "ip_address": container.ip_address,
                     "label": row['label'],
                     "parent_id": row['parent_id'],
                     "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (row['id'],)).fetchall(),
+                    "deleted_at": row['deleted_at'],
+                    "delete_reason": row['delete_reason']
                 })
             else:
-                print(f'dead container: {row['id']}')
+                # If container doesn't exist but is in DB, mark it as DEAD
+                sandboxes.append({
+                    "id": row['id'],
+                    "name": row['name'],
+                    "status": "terminated",
+                    "ip_address": None,
+                    "label": row['label'],
+                    "parent_id": row['parent_id'],
+                    "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (row['id'],)).fetchall(),
+                    "deleted_at": row['deleted_at'],
+                    "delete_reason": row['delete_reason']
+                })
             
     return {"sandboxes": sandboxes}
 
@@ -274,7 +287,7 @@ async def coalesce_sandbox(parent_sandbox_id: str, final_sandbox_id: str, req: R
 async def get_sandbox(sandbox_id: str, req: Request):
     with closing(get_db()) as db:
         sandbox = db.execute(
-            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL", 
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ?", 
             (sandbox_id, req.state.network)
         ).fetchone()
         if not sandbox:
@@ -282,7 +295,20 @@ async def get_sandbox(sandbox_id: str, req: Request):
 
         try:
             container = await engine.get_container(sandbox_id)
-            child_ids = [row['id'] for row in db.execute("SELECT id FROM sandboxes WHERE parent_id = ? AND deleted_at IS NULL", (sandbox_id,)).fetchall()]
+            child_ids = [row['id'] for row in db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (sandbox_id,)).fetchall()]
+            if not container:
+                # If container doesn't exist but is in DB, mark it as DEAD
+                return {
+                    "id": sandbox['id'],
+                    "name": sandbox['name'],
+                    "status": "terminated",
+                    "ip_address": None,
+                    "label": sandbox['label'],
+                    "parent_id": sandbox['parent_id'],
+                    "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (sandbox['id'],)).fetchall(),
+                    "deleted_at": sandbox['deleted_at'],
+                    "delete_reason": sandbox['delete_reason']
+                }
             
             return {
                 "id": container.id,
@@ -293,14 +319,15 @@ async def get_sandbox(sandbox_id: str, req: Request):
                 "parent_id": sandbox['parent_id'],
                 "child_ids": child_ids,
             }
-        except:
+        except Exception as e:
+            print(e)
             raise HTTPException(status_code=404, detail="Sandbox not found")
 
 @app.get("/sandboxes/{sandbox_id}/logs")
 async def get_sandbox_logs(req: Request, sandbox_id: str, stream: bool = False):
     with closing(get_db()) as db:
         sandbox = db.execute(
-            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ?",
             (sandbox_id, req.state.network)
         ).fetchone()
         if not sandbox:
@@ -308,6 +335,8 @@ async def get_sandbox_logs(req: Request, sandbox_id: str, stream: bool = False):
 
         try:
             container = await engine.get_container(sandbox_id)
+            if not container:
+                return PlainTextResponse("<container terminated>") # TODO retain logs
 
             # Update last active timestamp
             db.execute(
@@ -343,7 +372,7 @@ async def get_all_sandbox_logs(sandbox_id: str, req: Request, limit: int = 1000)
     with closing(get_db()) as db:
         # Verify sandbox exists and belongs to user's network
         sandbox = db.execute(
-            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ?",
             (sandbox_id, req.state.network)
         ).fetchone()
         if not sandbox:
@@ -411,7 +440,7 @@ async def update_sandbox_label(sandbox_id: str, request: UpdateSandboxRequest, r
 async def get_sandbox_tree(sandbox_id: str, req: Request):
     with closing(get_db()) as db:
         sandbox = db.execute(
-            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ?",
             (sandbox_id, req.state.network)
         ).fetchone()
         if not sandbox:
@@ -419,7 +448,9 @@ async def get_sandbox_tree(sandbox_id: str, req: Request):
 
         def build_tree(node_id, prefix="", is_root=False, is_last=True):
             node = db.execute("SELECT * FROM sandboxes WHERE id = ?", (node_id,)).fetchone()
-            node_label = f"📦 {node['label']} [{node_id}]"
+            is_deleted = node['deleted_at'] is not None
+            status_prefix = "💀 DEAD " if is_deleted else ""
+            node_label = f"{status_prefix}📦 {node['label']} [{node_id}]"
 
             if is_root:
                 tree_repr.append(node_label)
@@ -427,8 +458,13 @@ async def get_sandbox_tree(sandbox_id: str, req: Request):
                 connector = "└── " if is_last else "├── "
                 tree_repr.append(f"{prefix}{connector}{node_label}")
 
-            children = db.execute("SELECT id, label FROM sandboxes WHERE parent_id = ? AND deleted_at IS NULL", (node_id,)).fetchall()
-            tree_json = {"id": node_id, "label": node['label'], "children": []}
+            children = db.execute("SELECT id, label FROM sandboxes WHERE parent_id = ?", (node_id,)).fetchall()
+            tree_json = {
+                "id": node_id, 
+                "label": node['label'],
+                "status": "terminated" if is_deleted else "running",
+                "children": []
+            }
 
             new_prefix = prefix + ("    " if is_last else "│   ")
             for i, child in enumerate(children):
@@ -439,10 +475,11 @@ async def get_sandbox_tree(sandbox_id: str, req: Request):
         tree_repr = []
         tree_json = build_tree(sandbox_id, "", True, True)
 
-        return {
+        data =  {
             "tree": "\n".join(tree_repr),
             "tree_json": tree_json
         }
+        return JSONResponse(content=data, media_type="application/json; charset=utf-8")
 
 @app.post("/sandboxes/{sandbox_id}/execute")
 async def execute_code(req: Request, sandbox_id: str, request: ExecuteRequest, stream: bool = False):
@@ -692,13 +729,14 @@ async def delete_sandbox(sandbox_id: str, req: Request):
             if container:
                 await container.stop()
             
+            # Mark the sandbox as deleted instead of removing it
             db.execute(
                 "UPDATE sandboxes SET deleted_at = ?, delete_reason = 'user_deleted' WHERE id = ?",
                 (time.time(), sandbox_id)
             )
             db.commit()
             
-            return {"message": f"Sandbox {sandbox_id} deleted"}
+            return {"message": f"Sandbox {sandbox_id} marked as deleted"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -837,7 +875,7 @@ async def get_command_execution_logs(sandbox_id: str, execution_id: str, req: Re
     with closing(get_db()) as db:
         # Verify sandbox exists and belongs to user's network
         sandbox = db.execute(
-            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ?",
             (sandbox_id, req.state.network)
         ).fetchone()
         if not sandbox:
@@ -884,7 +922,7 @@ async def get_sandbox_command_executions(sandbox_id: str, req: Request, limit: i
     with closing(get_db()) as db:
         # Verify sandbox exists and belongs to user's network
         sandbox = db.execute(
-            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ?",
             (sandbox_id, req.state.network)
         ).fetchone()
         if not sandbox:
