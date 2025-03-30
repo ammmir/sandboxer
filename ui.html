@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sandbox Manager</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Add xterm.js dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.js" integrity="sha512-Gujw5GajF5is3nMoGv9X+tCMqePLL/60qvAv1LofUZTV9jK8ENbM9L+maGmOsNzuZaiuyc/fpph1KT9uR5w3CQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.min.css" integrity="sha512-XpXUuzg5afNt1bsgnrOesXP70TLH8tXYYK5sK+Y0UV+YBvJn9EfRFYWy4HT3TVDfH0nl1CO0lwOxIrt2gk9qjg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <style>
+        #terminal {
+            background: #1e1e1e;
+            padding: 10px;
+            border-radius: 4px;
+        }
+    </style>
 </head>
 <body class="h-screen flex bg-gray-100">
 
@@ -60,6 +70,11 @@
                     onclick="switchTab('exec')">
                 Command Execution
             </button>
+            <button id="terminal-tab" 
+                    class="px-4 py-2 text-sm font-medium rounded-t-lg border-t border-l border-r ml-2 bg-gray-100"
+                    onclick="switchTab('terminal')">
+                Terminal
+            </button>
             <button id="logs-tab" 
                     class="px-4 py-2 text-sm font-medium rounded-t-lg border-t border-l border-r ml-2 bg-gray-100"
                     onclick="switchTab('logs')">
@@ -84,6 +99,11 @@
                           autocorrect="off" spellcheck="false" onkeydown="handleEnter(event)"></textarea>
                 <button class="bg-green-500 text-white px-4 rounded" onclick="executeCode()">▶ Run</button>
             </div>
+        </div>
+
+        <!-- Terminal View -->
+        <div id="terminal-view" class="hidden flex-grow flex flex-col">
+            <div id="terminal" class="flex-grow"></div>
         </div>
 
         <!-- Logs View -->
@@ -126,6 +146,7 @@
                 <option value="redis">Redis</option>
                 <option value="nginx">Nginx</option>
                 <option value="firefox">Firefox</option>
+                <option value="bash">Bash</option>
             </select>
 
             <label class="block mt-2">Docker Image:</label>
@@ -144,17 +165,23 @@
                      class="border p-2 w-full h-24 font-mono text-sm" 
                      placeholder="Enter one environment variable per line, for example:&#10;POSTGRES_USER=foo&#10;POSTGRES_PASSWORD=bar&#10;"></textarea>
 
-            <div class="mt-4 flex justify-end">
-                <button class="bg-gray-500 text-white px-4 py-2 mr-2 rounded" onclick="closeCreateModal()" id="create-cancel-btn">Cancel</button>
-                <button class="bg-blue-500 text-white px-4 py-2 rounded flex items-center gap-2" onclick="createSandbox()" id="create-submit-btn">
-                    <span>Create</span>
-                    <div class="hidden" id="create-spinner">
-                        <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                    </div>
-                </button>
+            <div class="mt-4 flex justify-between items-center">
+                <label class="flex items-center text-sm text-gray-600">
+                    <input type="checkbox" id="sandbox-interactive" class="mr-2">
+                    Interactive (enable terminal)
+                </label>
+                <div class="flex">
+                    <button class="bg-gray-500 text-white px-4 py-2 mr-2 rounded" onclick="closeCreateModal()" id="create-cancel-btn">Cancel</button>
+                    <button class="bg-blue-500 text-white px-4 py-2 rounded flex items-center gap-2" onclick="createSandbox()" id="create-submit-btn">
+                        <span>Create</span>
+                        <div class="hidden" id="create-spinner">
+                            <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                        </div>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -162,8 +189,98 @@
     <script>
         let selectedSandbox = null;
         let logsInterval = null;
-        let logsAbortController = null;  // Add AbortController for logs streaming
-        let showDeadSandboxes = false;  // Add this at the top with other global variables
+        let logsAbortController = null;
+        let showDeadSandboxes = false;
+        let term = null;
+        let terminalWs = null;
+        let terminalDataHandler = null;
+
+        // Initialize terminal
+        function initTerminal() {
+            // Always dispose of existing terminal first
+            if (term) {
+                term.dispose();
+                term = null;
+            }
+            
+            // Create new terminal instance
+            term = new Terminal({
+                cursorBlink: true,
+                fontSize: 14,
+                fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                theme: {
+                    background: '#1e1e1e',
+                    foreground: '#ffffff',
+                    cursor: '#ffffff',
+                    selection: '#264f78'
+                }
+            });
+            term.open(document.getElementById('terminal'));
+        }
+
+        // Connect terminal to sandbox
+        function connectTerminal() {
+            if (!selectedSandbox) return;
+            
+            // Ensure terminal is initialized
+            if (!term) {
+                initTerminal();
+            }
+            
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/sandboxes/${selectedSandbox}/attach`;
+            
+            terminalWs = new WebSocket(wsUrl);
+            
+            terminalWs.onopen = () => {
+                console.log('Terminal WebSocket connected');
+            };
+            
+            terminalWs.onclose = () => {
+                console.log('Terminal WebSocket disconnected');
+                terminalWs = null;
+            };
+            
+            terminalWs.onerror = (error) => {
+                console.error('Terminal WebSocket error:', error);
+                terminalWs = null;
+            };
+            
+            terminalWs.onmessage = (event) => {
+                if (event.data instanceof Blob) {
+                    event.data.arrayBuffer().then(buffer => {
+                        const data = new Uint8Array(buffer);
+                        term.write(data);
+                    });
+                } else {
+                    term.write(event.data);
+                }
+            };
+
+            // Handle terminal input - store the handler reference
+            terminalDataHandler = data => {
+                if (terminalWs && terminalWs.readyState === WebSocket.OPEN) {
+                    const encoder = new TextEncoder();
+                    const binaryData = encoder.encode(data);
+                    terminalWs.send(binaryData);
+                }
+            };
+            term.onData(terminalDataHandler);
+        }
+
+        // Disconnect terminal
+        function disconnectTerminal() {
+            if (terminalWs) {
+                terminalWs.close();
+                terminalWs = null;
+            }
+            // Remove the data handler if it exists
+            if (terminalDataHandler && term) {
+                term.dispose();
+                term = null;
+                terminalDataHandler = null;
+            }
+        }
 
         async function loadSandboxes() {
             try {
@@ -241,6 +358,9 @@
                 logsAbortController = null;
             }
             
+            // Disconnect existing terminal connection
+            disconnectTerminal();
+            
             selectedSandbox = sandboxId;
             try {
                 const response = await fetch(`/sandboxes/${sandboxId}`);
@@ -296,6 +416,11 @@
                 // Initialize HTTP view if we're on the HTTP tab
                 if (!document.getElementById("http-view").classList.contains("hidden")) {
                     initializeHttpView();
+                }
+
+                // Connect terminal if we're on the terminal tab
+                if (!document.getElementById("terminal-view").classList.contains("hidden")) {
+                    connectTerminal();
                 }
             } catch (error) {
                 showError(error.message);
@@ -357,19 +482,29 @@
                 image: 'redis',
                 label: 'Redis',
                 args: ['redis-server'],
-                env: {}
+                env: {},
+                interactive: false
             },
             nginx: {
                 image: 'nginx',
                 label: 'Nginx',
                 args: [],
-                env: {}
+                env: {},
+                interactive: false
             },
             firefox: {
                 image: 'jlesage/firefox',
                 label: 'Firefox',
                 args: [],
-                env: {}
+                env: {},
+                interactive: false
+            },
+            bash: {
+                image: 'bash',
+                label: 'Bash',
+                args: [],
+                env: {},
+                interactive: true
             }
         };
 
@@ -381,6 +516,7 @@
                 document.getElementById('sandbox-label').value = '';
                 document.getElementById('sandbox-args').value = '';
                 document.getElementById('sandbox-env').value = '';
+                document.getElementById('sandbox-interactive').checked = false;
                 return;
             }
 
@@ -391,6 +527,7 @@
             document.getElementById('sandbox-env').value = Object.entries(example.env)
                 .map(([key, value]) => `${key}=${value}`)
                 .join('\n');
+            document.getElementById('sandbox-interactive').checked = example.interactive;
         }
 
         function setCreateLoading(isLoading) {
@@ -416,6 +553,7 @@
             hideError();
             const image = document.getElementById('sandbox-image').value.trim();
             const label = document.getElementById('sandbox-label').value.trim();
+            const interactive = document.getElementById('sandbox-interactive').checked;
             if (!image || !label) return showError("Please enter a Docker image and a label.");
 
             // Parse environment variables
@@ -443,7 +581,7 @@
                 const response = await fetch("/sandboxes", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ image, label, env, args })
+                    body: JSON.stringify({ image, label, env, args, interactive })
                 });
 
                 if (!response.ok) throw new Error(await response.text());
@@ -606,6 +744,8 @@
             // Update tab styling
             document.getElementById("exec-tab").classList.toggle("bg-white", tab === "exec");
             document.getElementById("exec-tab").classList.toggle("bg-gray-100", tab !== "exec");
+            document.getElementById("terminal-tab").classList.toggle("bg-white", tab === "terminal");
+            document.getElementById("terminal-tab").classList.toggle("bg-gray-100", tab !== "terminal");
             document.getElementById("logs-tab").classList.toggle("bg-white", tab === "logs");
             document.getElementById("logs-tab").classList.toggle("bg-gray-100", tab !== "logs");
             document.getElementById("http-tab").classList.toggle("bg-white", tab === "http");
@@ -613,8 +753,24 @@
 
             // Show/hide content
             document.getElementById("exec-view").classList.toggle("hidden", tab !== "exec");
+            const terminalView = document.getElementById("terminal-view");
+            const terminal = document.getElementById("terminal");
+            terminalView.classList.toggle("hidden", tab !== "terminal");
+            terminal.classList.toggle("hidden", tab !== "terminal");
             document.getElementById("logs-view").classList.toggle("hidden", tab !== "logs");
             document.getElementById("http-view").classList.toggle("hidden", tab !== "http");
+
+            // Handle terminal tab
+            if (tab === "terminal") {
+                if (!term) {
+                    initTerminal();
+                }
+                if (selectedSandbox) {
+                    connectTerminal();
+                }
+            } else {
+                disconnectTerminal();
+            }
 
             // Handle logs fetching
             if (tab === "logs" && selectedSandbox) {

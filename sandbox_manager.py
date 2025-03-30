@@ -139,6 +139,7 @@ class CreateSandboxRequest(BaseModel):
     label: str
     env: dict[str, str] = {}
     args: list[str] = []
+    interactive: bool
 
 class ForkSandboxRequest(BaseModel):
     label: str
@@ -195,6 +196,7 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
             name=container_name, 
             env=request.env, 
             args=request.args,
+            interactive=request.interactive,
             network=req.state.network
         )
         
@@ -975,6 +977,104 @@ async def get_sandbox_command_executions(sandbox_id: str, req: Request, limit: i
             })
 
         return {"executions": result}
+
+@app.websocket("/sandboxes/{sandbox_id}/attach")
+async def attach_sandbox(websocket: WebSocket, sandbox_id: str):
+    """WebSocket endpoint for attaching to a sandbox container's terminal."""
+    with closing(get_db()) as db:
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND deleted_at IS NULL",
+            (sandbox_id,)
+        ).fetchone()
+        if not sandbox:
+            await websocket.close(code=4004, reason="Sandbox not found")
+            return
+
+        # Update last active timestamp
+        db.execute(
+            "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
+            (time.time(), sandbox_id)
+        )
+        db.commit()
+
+    try:
+        container = await engine.get_container(sandbox_id)
+        if not container:
+            await websocket.close(code=4004, reason="Container not found")
+            return
+
+        # Accept the WebSocket connection
+        await websocket.accept()
+
+        # Attach to the container
+        detach_event, send_data, receive_data = await engine.attach_container(sandbox_id)
+
+        async def forward_output():
+            """Forward container output to WebSocket."""
+            try:
+                async for chunk in receive_data():
+                    if chunk:  # Only send non-empty chunks
+                        await websocket.send_bytes(chunk)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                print(f"Error forwarding output: {e}")
+            finally:
+                if not detach_event.is_set():
+                    detach_event.set()
+
+        async def forward_input():
+            """Forward WebSocket input to container."""
+            try:
+                while not detach_event.is_set():
+                    try:
+                        # Receive data from WebSocket
+                        data = await websocket.receive_bytes()
+                        
+                        # Handle escape sequences
+                        if data.startswith(b'\x1b'):
+                            # For escape sequences, we'll send them as-is
+                            await send_data(data)
+                        else:
+                            # For regular input, send it directly
+                            await send_data(data)
+                    except WebSocketDisconnect:
+                        break
+                    except Exception as e:
+                        print(f"Error forwarding input: {e}")
+                        break
+            finally:
+                if not detach_event.is_set():
+                    detach_event.set()
+
+        # Start both forwarding tasks
+        output_task = asyncio.create_task(forward_output())
+        input_task = asyncio.create_task(forward_input())
+
+        try:
+            # Wait for either task to complete
+            done, pending = await asyncio.wait(
+                [output_task, input_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # Cancel pending tasks
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        except Exception as e:
+            print(f"Error in main proxy loop: {e}")
+
+    except Exception as e:
+        print(f"WebSocket attach error: {e}")
+        try:
+            await websocket.close(code=4007, reason="Internal server error")
+        except Exception:
+            pass  # Connection might already be closed
 
 if __name__ == "__main__":
     import uvicorn

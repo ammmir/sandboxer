@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import AsyncIterator, List, Optional, Dict, Tuple, Union
+from typing import AsyncIterator, List, Optional, Dict, Tuple, Union, Callable, Awaitable
 import tarfile
 import tempfile
 import os
@@ -211,7 +211,7 @@ class ContainerEngine:
         output = await self._run_podman_command(['network', 'inspect', name])
         return json.loads(output)[0]
 
-    async def start_container(self, image: str, name: str, env: dict[str, str] = None, args: list[str] = None, network: str = None) -> Container:
+    async def start_container(self, image: str, name: str, env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False) -> Container:
         """
         Start a new container using `podman run -d`.
         Returns a `Container` object with its assigned IP address.
@@ -222,6 +222,10 @@ class ContainerEngine:
             '--security-opt', 'seccomp=unconfined',
             '--name', name,  # Container name
         ]
+
+        # Add interactive mode if requested
+        if interactive:
+            args_list.extend(['-it'])  # Add -it for interactive mode
 
         # Add network if specified
         if network:
@@ -490,6 +494,114 @@ class ContainerEngine:
                 print(f"Failed to delete snapshot {modified_snapshot}: {e}")
 
         return Container(id=restored_id, ip_address=container_ip, engine=self), modified_snapshot
+
+    async def attach_container(self, container_id: str) -> Tuple[asyncio.Event, Callable[[bytes], Awaitable[None]], AsyncIterator[bytes]]:
+        """
+        Attach to a running container's stdin/stdout/stderr.
+        Returns a tuple containing:
+        - An asyncio.Event that can be set to detach from the container
+        - A coroutine for sending data to stdin
+        - An async iterator for receiving data from stdout/stderr
+        """
+        #print(f"🔌 Attaching to container {container_id}")
+        # Create the attach command
+        args = self.podman_path + ['attach', container_id]
+        #print(f"Running command: {' '.join(args)}")
+        
+        # Start the attach process
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT  # Merge stderr into stdout
+        )
+        #print(f"Process started with PID {process.pid}")
+
+        # Create event for detaching
+        detach_event = asyncio.Event()
+        # Create a queue for output
+        output_queue = asyncio.Queue()
+
+        async def send_data(data: bytes) -> None:
+            """Send data to the container's stdin."""
+            if not detach_event.is_set():
+                try:
+                    #print(f"📤 Sending data: {data}")
+                    process.stdin.write(data)
+                    await process.stdin.drain()
+                    #print("Data sent successfully")
+                except Exception as e:
+                    #print(f"❌ Error sending data: {e}")
+                    detach_event.set()
+
+        async def read_output():
+            """Read output from stdout and put it in the queue."""
+            try:
+                while not detach_event.is_set():
+                    try:
+                        # Read in small chunks (1KB) to get data as soon as it's available
+                        chunk = await asyncio.wait_for(process.stdout.read(1024), timeout=0.1)
+                        if not chunk:  # EOF
+                            print("EOF reached")
+                            break
+                        await output_queue.put(chunk)
+                    except asyncio.TimeoutError:
+                        # Check if we should continue waiting
+                        continue
+                    except asyncio.CancelledError:
+                        print("Cancelled")
+                        break
+                    except Exception as e:
+                        print(f"❌ Error reading from stdout: {e}")
+                        break
+            finally:
+                if not detach_event.is_set():
+                    print("Sending detach sequence")
+                    try:
+                        process.stdin.write(b'\x10\x11')
+                        await process.stdin.drain()
+                    except Exception as e:
+                        print(f"❌ Error sending detach sequence: {e}")
+                    detach_event.set()
+                    try:
+                        print("Terminating process")
+                        process.terminate()
+                        await asyncio.wait_for(process.wait(), timeout=1.0)
+                    except (asyncio.TimeoutError, ProcessLookupError):
+                        print("Process already gone or didn't terminate, killing...")
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+
+        async def receive_data() -> AsyncIterator[bytes]:
+            """Receive data from the queue."""
+            #print("📥 Starting to receive data")
+            try:
+                while not detach_event.is_set():
+                    try:
+                        # Get data from queue with timeout
+                        try:
+                            chunk = await asyncio.wait_for(output_queue.get(), timeout=0.1)
+                            yield chunk
+                        except asyncio.TimeoutError:
+                            # No data available, yield empty to allow other operations
+                            yield b""
+                            continue
+                    except asyncio.CancelledError:
+                        break
+                    except Exception as e:
+                        print(f"❌ Error receiving data: {e}")
+                        break
+            finally:
+                # Ensure the read_output task is cancelled
+                if not detach_event.is_set():
+                    detach_event.set()
+
+        # Start the read_output task
+        read_task = asyncio.create_task(read_output())
+
+        return detach_event, send_data, receive_data  # Return the function, not the coroutine
 
     async def close(self):
         """Placeholder for cleanup if needed later."""
