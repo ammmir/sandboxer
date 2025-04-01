@@ -123,14 +123,45 @@ async def terminate_idle_sandboxes():
                 container = await engine.get_container(row['id'])
                 if container:
                     await container.stop()
+                    #await engine.remove_container(row['id'])
             except Exception:
                 pass
+
+async def sync_sandbox_states():
+    """Sync sandbox states with actual running containers on startup."""
+    with closing(get_db()) as db:
+        # Get all non-deleted sandboxes
+        sandboxes = db.execute("SELECT id FROM sandboxes WHERE deleted_at IS NULL").fetchall()
+        
+        now = time.time()
+        for sandbox in sandboxes:
+            try:
+                container = await engine.get_container(sandbox['id'])
+                if not container:
+                    print("marking container as dead: ", sandbox['id'])
+                    # Container doesn't exist, mark it as deleted
+                    db.execute(
+                        "UPDATE sandboxes SET deleted_at = ?, delete_reason = 'startup_sync' WHERE id = ?",
+                        (now, sandbox['id'])
+                    )
+            except Exception as e:
+                print(f"Error checking sandbox {sandbox['id']}: {e}")
+                # On error, mark as deleted to be safe
+                db.execute(
+                    "UPDATE sandboxes SET deleted_at = ?, delete_reason = 'startup_sync_error' WHERE id = ?",
+                    (now, sandbox['id'])
+                )
+        
+        db.commit()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    await sync_sandbox_states()  # Sync sandbox states before starting idle checker
     asyncio.create_task(terminate_idle_sandboxes())
+    await engine.start()
     yield
+    await engine.close()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -156,8 +187,8 @@ async def get_sandboxes(request: Request):
     with closing(get_db()) as db:
         rows = db.execute("SELECT * FROM sandboxes WHERE network = ?", (request.state.network,)).fetchall()
         for row in rows:
-            container = await engine.get_container(row['id'])
-            if container:
+            if not row['deleted_at']:
+                container = await engine.get_container(row['id'])
                 sandboxes.append({
                     "id": row['id'],
                     "name": container.name,
@@ -741,13 +772,6 @@ async def delete_sandbox(sandbox_id: str, req: Request):
             return {"message": f"Sandbox {sandbox_id} marked as deleted"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/")
-async def serve_ui(request: Request):
-    if request.session.get("user_id"):
-        return FileResponse("ui.html")
-    else:
-        return FileResponse("login.html")
 
 @app.websocket("/sandboxes/{sandbox_id}/proxy/{path:path}")
 async def proxy_websocket(websocket: WebSocket, sandbox_id: str, path: str):

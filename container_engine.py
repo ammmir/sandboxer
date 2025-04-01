@@ -43,6 +43,77 @@ class Container:
 class ContainerEngine:
     def __init__(self, podman_path: str = 'podman --runtime /usr/sbin/run2'):
         self.podman_path = podman_path.split()
+        self.inspect_cache = {}
+        self._events_task = None
+        self._cache_lock = asyncio.Lock()
+
+    async def _monitor_events(self):
+        """Background task to monitor podman events and update inspect cache."""
+        args = self.podman_path + ['system', 'events', '--stream', '--format', 'json']
+        
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        try:
+            while True:
+                line = await process.stdout.readline()
+                if not line:  # EOF
+                    break
+                
+                try:
+                    event = json.loads(line.decode())
+                    if event['Type'] == 'container':
+                        if event['Status'] == 'start':
+                            # Container started, update cache
+                            container_id = event['ID']
+                            inspect_output = await self._run_podman_command(['inspect', container_id])
+                            async with self._cache_lock:
+                                self.inspect_cache[container_id] = inspect_output
+                        elif event['Status'] == 'died':
+                            # Container died, remove from cache
+                            container_id = event['ID']
+                            async with self._cache_lock:
+                                self.inspect_cache.pop(container_id, None)
+                except json.JSONDecodeError:
+                    continue
+                except Exception as e:
+                    print(f"Error processing podman event: {e}")
+                    continue
+        finally:
+            try:
+                process.terminate()
+                await process.wait()
+            except ProcessLookupError:
+                pass
+
+    async def start(self):
+        """Start the event monitoring task."""
+        self._events_task = asyncio.create_task(self._monitor_events())
+
+    async def close(self):
+        """Clean up resources."""
+        if self._events_task:
+            self._events_task.cancel()
+            try:
+                await self._events_task
+            except asyncio.CancelledError:
+                pass
+            self._events_task = None
+
+    async def _get_container_info(self, container_id: str) -> dict:
+        """Get container info from cache or by running inspect."""
+        async with self._cache_lock:
+            if container_id in self.inspect_cache:
+                return json.loads(self.inspect_cache[container_id])[0]
+        
+        # If not in cache, run inspect and cache the result
+        output = await self._run_podman_command(['inspect', container_id])
+        async with self._cache_lock:
+            self.inspect_cache[container_id] = output
+        return json.loads(output)[0]
 
     async def _run_podman_command(self, args: List[str]) -> str:
         """Run a Podman CLI command asynchronously and return its output."""
@@ -127,6 +198,7 @@ class ContainerEngine:
                         async for line in stream:
                             yield stream_type, line.decode().strip(), exit_code
 
+                # TODO interleave stdout/stderr properly
                 async for output in read_stream(process.stdout, "stdout"):
                     yield output
                 async for output in read_stream(process.stderr, "stderr"):
@@ -249,8 +321,7 @@ class ContainerEngine:
 
     async def _get_container_ip(self, container_id: str) -> Tuple[str, Optional[str]]:
         """Inspect a container and return its assigned private IP and first exposed port."""
-        output = await self._run_podman_command(['inspect', container_id])
-        container_info = json.loads(output)[0]
+        container_info = await self._get_container_info(container_id)
 
         # First try the default network IP address
         ip_address = container_info["NetworkSettings"]["IPAddress"]
@@ -271,14 +342,13 @@ class ContainerEngine:
     async def get_container(self, container_id: str) -> Optional[Container]:
         """Inspect a container and return a `Container` object."""
         try:
-            output = await self._run_podman_command(['inspect', container_id])
-            data = json.loads(output)[0]
+            data = await self._get_container_info(container_id)
 
             # First try the default network IP address
             ip_address = data["NetworkSettings"]["IPAddress"]
             
             # If IP is empty and there are networks, get the first network's IP
-            if not ip_address and data["NetworkSettings"]["Networks"]:
+            if not ip_address and "Networks" in data["NetworkSettings"]:
                 # Get the first network's IP address
                 first_network = next(iter(data["NetworkSettings"]["Networks"].values()))
                 ip_address = first_network.get("IPAddress", "")
@@ -329,9 +399,7 @@ class ContainerEngine:
 
     async def _get_container_volumes(self, container_id: str) -> Dict[str, str]:
         """Find named volumes attached to a container."""
-        output = await self._run_podman_command(['inspect', container_id])
-        container_info = json.loads(output)[0]
-
+        container_info = await self._get_container_info(container_id)
         volume_map = {}
         for mount in container_info.get("Mounts", []):
             if mount["Type"] == "volume":
@@ -602,7 +670,3 @@ class ContainerEngine:
         read_task = asyncio.create_task(read_output())
 
         return detach_event, send_data, receive_data  # Return the function, not the coroutine
-
-    async def close(self):
-        """Placeholder for cleanup if needed later."""
-        pass

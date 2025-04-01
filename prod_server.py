@@ -74,7 +74,7 @@ app.add_middleware(
 
 hx = httpx.AsyncClient()
 
-@app.get("/auth/github")
+@app.get("/auth/github", include_in_schema=False)
 async def auth_github():
     github_auth_url = (
         "https://github.com/login/oauth/authorize"
@@ -92,7 +92,7 @@ async def create_network_bg(network_name: str):
     except Exception as e:
         print(f"Network creation failed (ignoring): {e}")
 
-@app.get("/auth/github/callback")
+@app.get("/auth/github/callback", include_in_schema=False)
 async def auth_github_callback(code: str, request: Request):
     # Exchange code for access token
     token_url = "https://github.com/login/oauth/access_token"
@@ -175,7 +175,7 @@ async def auth_github_callback(code: str, request: Request):
         print(f"GitHub OAuth error: {e}")
         raise HTTPException(status_code=500, detail="Authentication failed")
 
-@app.post("/auth/logout")
+@app.post("/auth/logout", include_in_schema=False)
 async def logout(request: Request):
     """Clear the session and log out the user."""
     request.session.clear()
@@ -184,7 +184,7 @@ async def logout(request: Request):
         status_code=303
     )
 
-@app.get("/auth/me")
+@app.get("/auth/me", include_in_schema=False)
 async def get_current_user(request: Request):
     """Get the current logged-in user's information."""
     user_id = request.session.get("user_id")
@@ -197,3 +197,10 @@ async def get_current_user(request: Request):
             request.session.clear()
             raise HTTPException(status_code=401, detail="Not authenticated")
         return dict(user)
+
+@app.get("/", include_in_schema=False)
+async def serve_ui(request: Request):
+    if request.session.get("user_id"):
+        return FileResponse("ui.html")
+    else:
+        return FileResponse("login.html")
