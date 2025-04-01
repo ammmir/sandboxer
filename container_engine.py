@@ -191,18 +191,37 @@ class ContainerEngine:
             async def output_stream() -> AsyncIterator[Tuple[str, str, int]]:
                 """Stream output line by line with an exit code of -1 until the process exits."""
                 exit_code = -1
+                queue = asyncio.Queue()
+                done = asyncio.Event()
 
                 async def read_stream(stream: Optional[asyncio.StreamReader], stream_type: str):
-                    nonlocal exit_code
                     if stream:
-                        async for line in stream:
-                            yield stream_type, line.decode().strip(), exit_code
+                        while True:
+                            chunk = await stream.read(1024)
+                            if not chunk:
+                                break
+                            await queue.put((stream_type, chunk.decode().strip(), exit_code))
+                    done.set()
 
-                # TODO interleave stdout/stderr properly
-                async for output in read_stream(process.stdout, "stdout"):
-                    yield output
-                async for output in read_stream(process.stderr, "stderr"):
-                    yield output
+                # Start reading from both streams
+                read_task = asyncio.gather(
+                    read_stream(process.stdout, "stdout"),
+                    read_stream(process.stderr, "stderr")
+                )
+
+                try:
+                    while not done.is_set() or not queue.empty():
+                        try:
+                            # Wait for data with a small timeout to check done event
+                            yield await asyncio.wait_for(queue.get(), timeout=0.1)
+                        except asyncio.TimeoutError:
+                            continue
+                finally:
+                    read_task.cancel()
+                    try:
+                        await read_task
+                    except asyncio.CancelledError:
+                        pass
 
                 exit_code = await process.wait()  # Wait for the process to exit
                 yield "exit", f"Process exited with code {exit_code}", exit_code
