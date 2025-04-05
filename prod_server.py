@@ -26,7 +26,7 @@ SESSION_SECRET = os.getenv("SESSION_SECRET")
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        protected_prefixes = ["/sandboxes", "/volumes"]
+        protected_prefixes = ["/sandboxes", "/volumes", "/events"]
         path = request.url.path
         requires_auth = any(path.startswith(prefix) for prefix in protected_prefixes)
         
@@ -204,3 +204,7 @@ async def serve_ui(request: Request):
         return FileResponse("ui.html")
     else:
         return FileResponse("login.html")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=443, ssl_keyfile="key.pem", ssl_certfile="cert.pem", timeout_graceful_shutdown=10)

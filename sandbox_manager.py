@@ -27,6 +27,42 @@ PROXY_TIMEOUT = 30
 engine = ContainerEngine()
 hx = httpx.AsyncClient()
 
+# Add SSE client management
+class SSEClientManager:
+    def __init__(self):
+        self._clients = {}  # network -> set of queues
+        self._lock = asyncio.Lock()
+
+    async def add_client(self, network: str, queue: asyncio.Queue):
+        async with self._lock:
+            if network not in self._clients:
+                self._clients[network] = set()
+            self._clients[network].add(queue)
+
+    async def remove_client(self, network: str, queue: asyncio.Queue):
+        async with self._lock:
+            if network in self._clients:
+                self._clients[network].discard(queue)
+                if not self._clients[network]:
+                    del self._clients[network]
+
+    async def broadcast(self, network: str, event: dict):
+        async with self._lock:
+            if network in self._clients:
+                for queue in self._clients[network]:
+                    try:
+                        await queue.put(event)
+                    except asyncio.CancelledError:
+                        pass
+
+    async def shutdown(self):
+        async with self._lock:
+            for network in list(self._clients.keys()):
+                for queue in self._clients[network]:
+                    await queue.put(None)
+
+sse_manager = SSEClientManager()
+
 def init_db():
     with closing(sqlite3.connect(DATABASE)) as db:
         # Existing tables
@@ -124,7 +160,7 @@ async def terminate_idle_sandboxes():
                 if container:
                     await container.stop()
                     #await engine.remove_container(row['id'])
-            except Exception:
+            except:
                 pass
 
 async def sync_sandbox_states():
@@ -138,7 +174,6 @@ async def sync_sandbox_states():
             try:
                 container = await engine.get_container(sandbox['id'])
                 if not container:
-                    print("marking container as dead: ", sandbox['id'])
                     # Container doesn't exist, mark it as deleted
                     db.execute(
                         "UPDATE sandboxes SET deleted_at = ?, delete_reason = 'startup_sync' WHERE id = ?",
@@ -154,13 +189,70 @@ async def sync_sandbox_states():
         
         db.commit()
 
+async def handle_container_events():
+    """Background task to handle container lifecycle events."""
+    event_queue = await engine.subscribe()
+    try:
+        while True:
+            event = await event_queue.get()
+            if event is None:  # Shutdown signal
+                break
+                
+            try:
+                with closing(get_db()) as db:
+                    if event["type"] == "container_stopped":
+                        # Mark sandbox as deleted
+                        now = time.time()
+                        db.execute(
+                            "UPDATE sandboxes SET deleted_at = ?, delete_reason = 'container_stopped' WHERE id = ? AND deleted_at IS NULL",
+                            (now, event["container_id"])
+                        )
+                        db.commit()
+                        
+                        # Get the network for this sandbox
+                        sandbox = db.execute(
+                            "SELECT network FROM sandboxes WHERE id = ?",
+                            (event["container_id"],)
+                        ).fetchone()
+                        
+                        if sandbox:
+                            # Broadcast the event to all clients in this network
+                            await sse_manager.broadcast(sandbox["network"], event)
+                            
+                    elif event["type"] == "container_started":
+                        # Update sandbox status if it exists
+                        db.execute(
+                            "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
+                            (event["timestamp"], event["container_id"])
+                        )
+                        db.commit()
+                        
+                        # Get the network for this sandbox
+                        sandbox = db.execute(
+                            "SELECT network FROM sandboxes WHERE id = ?",
+                            (event["container_id"],)
+                        ).fetchone()
+                        
+                        if sandbox:
+                            # Broadcast the event to all clients in this network
+                            await sse_manager.broadcast(sandbox["network"], event)
+                            
+            except Exception as e:
+                print(f"Error handling container event: {e}")
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await engine.unsubscribe(event_queue)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     await sync_sandbox_states()  # Sync sandbox states before starting idle checker
     asyncio.create_task(terminate_idle_sandboxes())
+    asyncio.create_task(handle_container_events())  # Start event handler
     await engine.start()
     yield
+    await sse_manager.shutdown()
     await engine.close()
 
 app = FastAPI(lifespan=lifespan)
@@ -263,6 +355,18 @@ async def fork_sandbox(sandbox_id: str, request: ForkSandboxRequest, req: Reques
                 (forked_container.id, forked_container.name, child_label, parent['image'], req.state.network, sandbox_id, time.time())
             )
             db.commit()
+
+            # Emit fork event
+            await sse_manager.broadcast(req.state.network, {
+                "type": "sandbox_forked",
+                "container_id": forked_container.id,
+                "timestamp": time.time(),
+                "data": {
+                    "parent_id": sandbox_id,
+                    "label": child_label
+                }
+            })
+
             return {"id": forked_container.id}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -313,6 +417,17 @@ async def coalesce_sandbox(parent_sandbox_id: str, final_sandbox_id: str, req: R
                     await container.stop()
             except Exception:
                 pass
+
+        # Emit coalesce event
+        await sse_manager.broadcast(req.state.network, {
+            "type": "sandbox_coalesced",
+            "container_id": final_sandbox_id,
+            "timestamp": time.time(),
+            "data": {
+                "terminated_sandboxes": sandboxes_to_terminate,
+                "final_sandbox": final_sandbox_id
+            }
+        })
 
         return {"message": f"Sandbox {final_sandbox_id} is now the new root"}
 
@@ -466,6 +581,14 @@ async def update_sandbox_label(sandbox_id: str, request: UpdateSandboxRequest, r
         
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="Sandbox not found")
+            
+        # Emit label change event
+        await sse_manager.broadcast(req.state.network, {
+            "type": "sandbox_label_changed",
+            "container_id": sandbox_id,
+            "timestamp": time.time(),
+            "data": {"label": request.label}
+        })
             
         return {"id": sandbox_id, "label": request.label}
 
@@ -1001,6 +1124,33 @@ async def get_sandbox_command_executions(sandbox_id: str, req: Request, limit: i
             })
 
         return {"executions": result}
+
+@app.get("/events")
+async def events(request: Request):
+    """SSE endpoint for container events."""
+    async def event_stream():
+        queue = asyncio.Queue()
+        await sse_manager.add_client(request.state.network, queue)
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:  # Shutdown signal
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await sse_manager.remove_client(request.state.network, queue)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 @app.websocket("/sandboxes/{sandbox_id}/attach")
 async def attach_sandbox(websocket: WebSocket, sandbox_id: str):

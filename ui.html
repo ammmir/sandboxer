@@ -195,6 +195,32 @@
         let terminalWs = null;
         let terminalDataHandler = null;
 
+        // Add SSE connection management
+        let eventSource = null;
+
+        function connectSSE() {
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            eventSource = new EventSource('/events');
+            
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                console.log('Received event:', data);
+                
+                // Refresh sandbox list when container events occur
+                setTimeout(loadSandboxes, 500);
+            };
+            
+            eventSource.onerror = function(error) {
+                console.error('SSE Error:', error);
+                eventSource.close();
+                // Attempt to reconnect after a delay
+                setTimeout(connectSSE, 5000);
+            };
+        }
+
         // Initialize terminal
         function initTerminal() {
             // Always dispose of existing terminal first
@@ -915,8 +941,19 @@
             }
         }
 
-        loadSandboxes();
-        loadUserInfo();
+        // Connect to SSE when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            connectSSE();
+            loadSandboxes();
+            loadUserInfo();
+        });
+
+        // Clean up SSE connection when page unloads
+        window.addEventListener('beforeunload', function() {
+            if (eventSource) {
+                eventSource.close();
+            }
+        });
     </script>
 </body>
 </html>

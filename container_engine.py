@@ -9,6 +9,7 @@ import subprocess
 import uuid
 import io
 import re
+import time
 
 class Container:
     def __init__(self, engine: 'ContainerEngine', **kwargs):
@@ -46,6 +47,37 @@ class ContainerEngine:
         self.inspect_cache = {}
         self._events_task = None
         self._cache_lock = asyncio.Lock()
+        self._subscribers = set()
+        self._shutdown_event = asyncio.Event()
+
+    async def subscribe(self) -> asyncio.Queue:
+        """Subscribe to container events. Returns a queue that will receive events."""
+        if self._shutdown_event.is_set():
+            raise RuntimeError("ContainerEngine is shutting down")
+        queue = asyncio.Queue()
+        self._subscribers.add(queue)
+        return queue
+
+    async def unsubscribe(self, queue: asyncio.Queue) -> None:
+        """Unsubscribe from container events."""
+        self._subscribers.discard(queue)
+
+    async def _emit_event(self, event_type: str, container_id: str, data: dict = None) -> None:
+        """Emit an event to all subscribers."""
+        if self._shutdown_event.is_set():
+            return
+        event = {
+            "type": event_type,
+            "container_id": container_id,
+            "timestamp": time.time(),
+            "data": data or {}
+        }
+        for queue in self._subscribers:
+            try:
+                await queue.put(event)
+            except asyncio.CancelledError:
+                # If queue is closed, remove it from subscribers
+                self._subscribers.discard(queue)
 
     async def _monitor_events(self):
         """Background task to monitor podman events and update inspect cache."""
@@ -58,29 +90,36 @@ class ContainerEngine:
         )
 
         try:
-            while True:
-                line = await process.stdout.readline()
-                if not line:  # EOF
-                    break
-                
+            while not self._shutdown_event.is_set():
                 try:
-                    event = json.loads(line.decode())
-                    if event['Type'] == 'container':
-                        if event['Status'] == 'start':
-                            # Container started, update cache
+                    line = await asyncio.wait_for(process.stdout.readline(), timeout=1.0)
+                    if not line:  # EOF
+                        break
+                    
+                    try:
+                        event = json.loads(line.decode())
+                        if event['Type'] == 'container':
                             container_id = event['ID']
-                            inspect_output = await self._run_podman_command(['inspect', container_id])
-                            async with self._cache_lock:
-                                self.inspect_cache[container_id] = inspect_output
-                        elif event['Status'] == 'died':
-                            # Container died, remove from cache
-                            container_id = event['ID']
-                            async with self._cache_lock:
-                                self.inspect_cache.pop(container_id, None)
-                except json.JSONDecodeError:
-                    continue
-                except Exception as e:
-                    print(f"Error processing podman event: {e}")
+                            if event['Status'] == 'start':
+                                # Container started, update cache
+                                inspect_output = await self._run_podman_command(['inspect', container_id])
+                                async with self._cache_lock:
+                                    self.inspect_cache[container_id] = inspect_output
+                                # Emit start event
+                                await self._emit_event("container_started", container_id)
+                            elif event['Status'] == 'died':
+                                # Container died, remove from cache
+                                async with self._cache_lock:
+                                    self.inspect_cache.pop(container_id, None)
+                                # Emit died event
+                                await self._emit_event("container_stopped", container_id)
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception as e:
+                        print(f"Error processing podman event: {e}")
+                        continue
+                except asyncio.TimeoutError:
+                    # Check shutdown event periodically
                     continue
         finally:
             try:
@@ -95,6 +134,10 @@ class ContainerEngine:
 
     async def close(self):
         """Clean up resources."""
+        # Signal shutdown
+        self._shutdown_event.set()
+        
+        # Cancel event monitoring task
         if self._events_task:
             self._events_task.cancel()
             try:
@@ -102,6 +145,14 @@ class ContainerEngine:
             except asyncio.CancelledError:
                 pass
             self._events_task = None
+
+        # Close all subscriber queues
+        for queue in self._subscribers:
+            try:
+                await queue.put(None)  # Signal end of events
+            except asyncio.CancelledError:
+                pass
+        self._subscribers.clear()
 
     async def _get_container_info(self, container_id: str) -> dict:
         """Get container info from cache or by running inspect."""
