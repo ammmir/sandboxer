@@ -52,6 +52,7 @@
             <span id="sandbox-info">Select a sandbox to view status.</span>
             <div id="sandbox-actions" class="hidden space-x-2">
                 <button class="bg-gray-500 text-white px-3 py-1 rounded text-sm" onclick="renameSandbox()">✏ Rename</button>
+                <button id="public-toggle" class="bg-purple-500 text-white px-3 py-1 rounded text-sm" onclick="togglePublic()">🔒 Make Public</button>
                 <button class="bg-red-500 text-white px-3 py-1 rounded text-sm" onclick="deleteSandbox()">❌ Stop</button>
                 <button class="bg-purple-500 text-white px-3 py-1 rounded text-sm" onclick="forkSandbox()">🔀 Fork</button>
             </div>
@@ -418,6 +419,18 @@
                         button.classList.remove("opacity-50", "cursor-not-allowed");
                     }
                 });
+
+                // Update public toggle button
+                const publicToggle = document.getElementById("public-toggle");
+                if (sb.is_public) {
+                    publicToggle.innerHTML = "🔓 Make Private";
+                    publicToggle.classList.remove("bg-purple-500");
+                    publicToggle.classList.add("bg-green-500");
+                } else {
+                    publicToggle.innerHTML = "🔒 Make Public";
+                    publicToggle.classList.remove("bg-green-500");
+                    publicToggle.classList.add("bg-purple-500");
+                }
 
                 // Disable command execution controls if terminated
                 const execCode = document.getElementById("exec-code");
@@ -984,6 +997,33 @@
                 }
             } catch (error) {
                 console.error('Error logging out:', error);
+            }
+        }
+
+        async function togglePublic() {
+            if (!selectedSandbox) return showError("Select a sandbox first.");
+            try {
+                const response = await fetch(`/sandboxes/${selectedSandbox}`);
+                if (!response.ok) throw new Error("Failed to fetch sandbox details.");
+                const sb = await response.json();
+                
+                const newPublicState = !sb.is_public;
+                const action = newPublicState ? "make public" : "make private";
+                
+                if (!confirm(`Are you sure you want to ${action} this sandbox?`)) return;
+                
+                const updateResponse = await fetch(`/sandboxes/${selectedSandbox}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ public: newPublicState })
+                });
+
+                if (!updateResponse.ok) throw new Error(await updateResponse.text());
+                
+                // Refresh sandbox details to update UI
+                selectSandbox(selectedSandbox);
+            } catch (error) {
+                showError(error.message);
             }
         }
 

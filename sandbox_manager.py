@@ -77,6 +77,7 @@ def init_db():
                 last_active_at INTEGER,
                 deleted_at INTEGER NULL,
                 delete_reason TEXT NULL,
+                is_public BOOLEAN DEFAULT FALSE,
                 FOREIGN KEY(network) REFERENCES networks(name)
             )
         """)
@@ -271,7 +272,8 @@ class ExecuteRequest(BaseModel):
     code: str
 
 class UpdateSandboxRequest(BaseModel):
-    label: str
+    label: str | None = None
+    public: bool | None = None
 
 @app.get("/sandboxes")
 async def get_sandboxes(request: Request):
@@ -476,7 +478,8 @@ async def get_sandbox(sandbox_id: str, req: Request):
                 "label": sandbox['label'],
                 "parent_id": sandbox['parent_id'],
                 "child_ids": child_ids,
-                "url": sandbox_url
+                "url": sandbox_url,
+                "is_public": bool(sandbox['is_public'])
             }
         except Exception as e:
             print(e)
@@ -579,29 +582,51 @@ async def get_all_sandbox_logs(sandbox_id: str, req: Request, limit: int = 1000)
         }
 
 @app.patch("/sandboxes/{sandbox_id}")
-async def update_sandbox_label(sandbox_id: str, request: UpdateSandboxRequest, req: Request):
-    if not request.label.strip():
-        raise HTTPException(status_code=400, detail="Label cannot be empty.")
-        
+async def update_sandbox(sandbox_id: str, request: UpdateSandboxRequest, req: Request):
     with closing(get_db()) as db:
-        result = db.execute(
-            "UPDATE sandboxes SET label = ? WHERE id = ? AND network = ? AND deleted_at IS NULL",
-            (request.label, sandbox_id, req.state.network)
-        )
+        # First check if sandbox exists and belongs to user's network
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
+
+        if request.label is not None and not request.label.strip():
+            raise HTTPException(status_code=400, detail="Label cannot be empty.")
+            
+        # Always update with all fields, using existing values if not provided
+        result = db.execute("""
+            UPDATE sandboxes 
+            SET label = COALESCE(?, label),
+                is_public = COALESCE(?, is_public)
+            WHERE id = ? AND network = ? AND deleted_at IS NULL
+        """, (
+            request.label if request.label is not None else None,
+            request.public if request.public is not None else None,
+            sandbox_id,
+            req.state.network
+        ))
         db.commit()
         
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="Sandbox not found")
             
-        # Emit label change event
+        # Emit update event
+        event_data = {}
+        if request.label is not None:
+            event_data["label"] = request.label
+        if request.public is not None:
+            event_data["public"] = request.public
+            
         await sse_manager.broadcast(req.state.network, {
-            "type": "sandbox_label_changed",
+            "type": "sandbox_updated",
             "container_id": sandbox_id,
             "timestamp": time.time(),
-            "data": {"label": request.label}
+            "data": event_data
         })
             
-        return {"id": sandbox_id, "label": request.label}
+        return {"id": sandbox_id, **event_data}
 
 @app.get("/sandboxes/{sandbox_id}/tree")
 async def get_sandbox_tree(sandbox_id: str, req: Request):
@@ -813,6 +838,10 @@ async def proxy_request(sandbox_id_or_name: str, path: str, request: Request):
         if not sandbox:
             raise HTTPException(status_code=404, detail="Sandbox not found")
 
+        # Check if sandbox is public or belongs to user's network
+        if not sandbox['is_public'] and sandbox['network'] != request.state.network:
+            raise HTTPException(status_code=403, detail="Access denied")
+
         # Update last active timestamp
         db.execute(
             "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
@@ -938,6 +967,11 @@ async def proxy_websocket(websocket: WebSocket, sandbox_id_or_name: str, path: s
             
         if not sandbox:
             await websocket.close(code=4004, reason="Sandbox not found")
+            return
+
+        # Check if sandbox is public or belongs to user's network
+        if not sandbox['is_public'] and sandbox['network'] != websocket.state.network:
+            await websocket.close(code=4003, reason="Access denied")
             return
 
         # Update last active timestamp

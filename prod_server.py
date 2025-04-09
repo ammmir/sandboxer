@@ -34,29 +34,44 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not requires_auth:
             return await call_next(request)
 
+        is_public = False
         user_id = request.session.get("user_id")
-        if not user_id:
+
+        # Check if this is a proxy request to a public sandbox
+        if path.startswith("/sandboxes/") and "/proxy/" in path:
+            parts = path.split("/")
+            if len(parts) >= 4:  # /sandboxes/{name}/proxy/...
+                sandbox_name = parts[2]
+                
+                with closing(get_db()) as db:
+                    # Get sandbox and its owner
+                    sandbox = db.execute("""
+                        SELECT s.*, n.user_id as owner_id
+                        FROM sandboxes s
+                        JOIN networks n ON s.network = n.name
+                        WHERE s.name = ? AND s.is_public = TRUE AND s.deleted_at IS NULL
+                    """, (sandbox_name,)).fetchone()
+                        
+                    if sandbox:
+                        is_public = True
+                        user_id = sandbox['owner_id']
+
+        # sandbox is either private or doesn't exist
+        if not is_public and not user_id:
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Authentication required"},
                 headers={"WWW-Authenticate": "Session"}
             )
 
-        # Get user from database instead of dict
+        # Get user from database
         with closing(get_db()) as db:
             user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            if not user:
-                request.session.clear()
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "Authentication required"},
-                    headers={"WWW-Authenticate": "Session"}
-                )
 
-            # Add user and default network to request state
+            # Add user and network to request state
             request.state.user = dict(user)
             request.state.user_id = user_id
-            request.state.network = f"user_{user_id}"  # Default network per user
+            request.state.network = f"user_{user_id}"
         
         return await call_next(request)
 
