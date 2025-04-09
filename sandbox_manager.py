@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import asyncio
 import time
 import httpx
-import uuid
+from ulid import ULID
 import json
 import os
 import websockets
@@ -18,8 +18,8 @@ from container_engine import ContainerEngine, Container
 load_dotenv()
 
 # configuration
-CONTAINER_PREFIX = "sandbox_"
 DATABASE = os.getenv('DATABASE', 'sandboxer.sqlite')
+SANDBOX_VHOST = os.getenv("SANDBOX_VHOST")
 IDLE_TIMEOUT = 24*60*60
 CHECK_INTERVAL = 60
 PROXY_TIMEOUT = 30
@@ -69,7 +69,7 @@ def init_db():
         db.execute("""
             CREATE TABLE IF NOT EXISTS sandboxes (
                 id TEXT PRIMARY KEY,
-                name TEXT,
+                name TEXT UNIQUE NOT NULL,
                 label TEXT,
                 image TEXT,
                 network TEXT,
@@ -281,6 +281,9 @@ async def get_sandboxes(request: Request):
         for row in rows:
             if not row['deleted_at']:
                 container = await engine.get_container(row['id'])
+                # Construct the URL for the sandbox
+                sandbox_url = f"https://{row['name']}.{SANDBOX_VHOST}"
+                
                 sandboxes.append({
                     "id": row['id'],
                     "name": container.name,
@@ -290,7 +293,8 @@ async def get_sandboxes(request: Request):
                     "parent_id": row['parent_id'],
                     "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (row['id'],)).fetchall(),
                     "deleted_at": row['deleted_at'],
-                    "delete_reason": row['delete_reason']
+                    "delete_reason": row['delete_reason'],
+                    "url": sandbox_url
                 })
             else:
                 # If container doesn't exist but is in DB, mark it as DEAD
@@ -303,14 +307,15 @@ async def get_sandboxes(request: Request):
                     "parent_id": row['parent_id'],
                     "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (row['id'],)).fetchall(),
                     "deleted_at": row['deleted_at'],
-                    "delete_reason": row['delete_reason']
+                    "delete_reason": row['delete_reason'],
+                    "url": None
                 })
             
     return {"sandboxes": sandboxes}
 
 @app.post("/sandboxes")
 async def create_sandbox(request: CreateSandboxRequest, req: Request):
-    container_name = CONTAINER_PREFIX + str(uuid.uuid4())[:8]
+    container_name = str(ULID()).lower()
     label = request.label if request.label else container_name
     
     try:
@@ -347,7 +352,7 @@ async def fork_sandbox(sandbox_id: str, request: ForkSandboxRequest, req: Reques
         try:
             forked_container, _ = await engine.fork_container(
                 sandbox_id, 
-                f"{sandbox_id}-fork-{str(uuid.uuid4())[:8]}"
+                str(ULID()).lower()
             )
             
             db.execute(
@@ -444,6 +449,7 @@ async def get_sandbox(sandbox_id: str, req: Request):
         try:
             container = await engine.get_container(sandbox_id)
             child_ids = [row['id'] for row in db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (sandbox_id,)).fetchall()]
+            
             if not container:
                 # If container doesn't exist but is in DB, mark it as DEAD
                 return {
@@ -455,8 +461,12 @@ async def get_sandbox(sandbox_id: str, req: Request):
                     "parent_id": sandbox['parent_id'],
                     "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (sandbox['id'],)).fetchall(),
                     "deleted_at": sandbox['deleted_at'],
-                    "delete_reason": sandbox['delete_reason']
+                    "delete_reason": sandbox['delete_reason'],
+                    "url": None
                 }
+            
+            # Construct the URL for the sandbox
+            sandbox_url = f"https://{container.name}.{SANDBOX_VHOST}"
             
             return {
                 "id": container.id,
@@ -466,6 +476,7 @@ async def get_sandbox(sandbox_id: str, req: Request):
                 "label": sandbox['label'],
                 "parent_id": sandbox['parent_id'],
                 "child_ids": child_ids,
+                "url": sandbox_url
             }
         except Exception as e:
             print(e)
@@ -665,7 +676,7 @@ async def execute_code(req: Request, sandbox_id: str, request: ExecuteRequest, s
 
             if stream:
                 # Create command execution record
-                execution_id = str(uuid.uuid4())
+                execution_id = str(ULID()).lower()
                 db.execute("""
                     INSERT INTO command_executions (id, sandbox_id, command, exit_code, executed_at)
                     VALUES (?, ?, ?, 0, ?)
@@ -745,7 +756,7 @@ async def execute_code(req: Request, sandbox_id: str, request: ExecuteRequest, s
                 stdout, stderr, exit_code = await container.exec(request.code, stream=False)
                 
                 # Create command execution record
-                execution_id = str(uuid.uuid4())
+                execution_id = str(ULID()).lower()
                 db.execute("""
                     INSERT INTO command_executions (id, sandbox_id, command, exit_code, executed_at)
                     VALUES (?, ?, ?, ?, ?)
@@ -781,24 +792,35 @@ async def execute_code(req: Request, sandbox_id: str, request: ExecuteRequest, s
             db.close()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.api_route("/sandboxes/{sandbox_id}/proxy/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
-async def proxy_request(sandbox_id: str, path: str, request: Request):
+@app.api_route("/sandboxes/{sandbox_id_or_name}/proxy/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
+async def proxy_request(sandbox_id_or_name: str, path: str, request: Request):
     with closing(get_db()) as db:
-        sandbox = db.execute(
-            "SELECT * FROM sandboxes WHERE id = ? AND deleted_at IS NULL",
-            (sandbox_id, )
-        ).fetchone()
+        # Determine if we should look up by ID or name based on the length
+        # Container IDs are typically 12 characters long
+        if len(sandbox_id_or_name) == 12:
+            # Look up by ID
+            sandbox = db.execute(
+                "SELECT * FROM sandboxes WHERE id = ? AND deleted_at IS NULL",
+                (sandbox_id_or_name, )
+            ).fetchone()
+        else:
+            # Look up by name
+            sandbox = db.execute(
+                "SELECT * FROM sandboxes WHERE name = ? AND deleted_at IS NULL",
+                (sandbox_id_or_name, )
+            ).fetchone()
+            
         if not sandbox:
             raise HTTPException(status_code=404, detail="Sandbox not found")
 
         # Update last active timestamp
         db.execute(
             "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
-            (time.time(), sandbox_id)
+            (time.time(), sandbox['id'])
         )
         db.commit()
 
-    container = await engine.get_container(sandbox_id)
+    container = await engine.get_container(sandbox['id'])
     if not container or not container.ip_address or not container.exposed_port:
         print(f'container ip: {container.ip_address} port: {container.exposed_port}')
         raise HTTPException(status_code=500, detail="Sandbox container is missing network info")
@@ -896,13 +918,24 @@ async def delete_sandbox(sandbox_id: str, req: Request):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-@app.websocket("/sandboxes/{sandbox_id}/proxy/{path:path}")
-async def proxy_websocket(websocket: WebSocket, sandbox_id: str, path: str):
+@app.websocket("/sandboxes/{sandbox_id_or_name}/proxy/{path:path}")
+async def proxy_websocket(websocket: WebSocket, sandbox_id_or_name: str, path: str):
     with closing(get_db()) as db:
-        sandbox = db.execute(
-            "SELECT * FROM sandboxes WHERE id = ? AND deleted_at IS NULL",
-            (sandbox_id, )
-        ).fetchone()
+        # Determine if we should look up by ID or name based on the length
+        # Container IDs are typically 12 characters long
+        if len(sandbox_id_or_name) == 12:
+            # Look up by ID
+            sandbox = db.execute(
+                "SELECT * FROM sandboxes WHERE id = ? AND deleted_at IS NULL",
+                (sandbox_id_or_name, )
+            ).fetchone()
+        else:
+            # Look up by name
+            sandbox = db.execute(
+                "SELECT * FROM sandboxes WHERE name = ? AND deleted_at IS NULL",
+                (sandbox_id_or_name, )
+            ).fetchone()
+            
         if not sandbox:
             await websocket.close(code=4004, reason="Sandbox not found")
             return
@@ -910,11 +943,11 @@ async def proxy_websocket(websocket: WebSocket, sandbox_id: str, path: str):
         # Update last active timestamp
         db.execute(
             "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
-            (time.time(), sandbox_id)
+            (time.time(), sandbox['id'])
         )
         db.commit()
 
-    container = await engine.get_container(sandbox_id)
+    container = await engine.get_container(sandbox['id'])
     if not container or not container.ip_address or not container.exposed_port:
         await websocket.close(code=4005, reason="Sandbox container is missing network info")
         return

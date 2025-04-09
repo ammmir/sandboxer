@@ -130,7 +130,7 @@
                 </button>
                 <button class="bg-blue-500 text-white px-4 py-2 rounded" onclick="navigateIframe()">Go</button>
             </div>
-            <iframe id="sandbox-iframe" class="w-full flex-grow mt-4 border rounded" sandbox="allow-same-origin allow-scripts allow-forms"></iframe>
+            <iframe id="sandbox-iframe" class="w-full flex-grow mt-4 border rounded" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-storage-access-by-user-activation"></iframe>
         </div>
 
     </div>
@@ -396,8 +396,12 @@
                 const isTerminated = sb.status === "terminated";
                 const statusColor = isTerminated ? "text-red-500" : "text-gray-800";
                 
-                document.getElementById("sandbox-info").innerHTML = 
+                const sandboxInfo = document.getElementById("sandbox-info");
+                sandboxInfo.innerHTML = 
                     `📦 ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}] | <span class="${statusColor}">Status: ${sb.status}</span> | IP: ${sb.ip_address || "N/A"}`;
+                
+                // Store the sandbox URL as a data attribute
+                sandboxInfo.setAttribute("data-url", sb.url || "");
 
                 // Show action buttons but disable them if terminated
                 const actionsDiv = document.getElementById("sandbox-actions");
@@ -710,7 +714,9 @@
                 
                 // Reset UI state
                 selectedSandbox = null;
-                document.getElementById("sandbox-info").innerText = "Select a sandbox to view status.";
+                const sandboxInfo = document.getElementById("sandbox-info");
+                sandboxInfo.innerText = "Select a sandbox to view status.";
+                sandboxInfo.removeAttribute("data-url");
                 document.getElementById("sandbox-actions").classList.add("hidden");
                 document.getElementById("exec-results").innerHTML = "";
                 document.getElementById("sandbox-logs").innerHTML = "<p class='text-gray-500'>Sandbox logs will appear here.</p>";
@@ -813,16 +819,41 @@
 
         function initializeHttpView() {
             const urlBar = document.getElementById("url-bar");
-            urlBar.value = "/";
+            const sandboxInfo = document.getElementById("sandbox-info");
+            const sandboxUrl = sandboxInfo.getAttribute("data-url");
+            
+            if (sandboxUrl) {
+                urlBar.value = sandboxUrl;
+            } else {
+                urlBar.value = "";
+            }
+            
             navigateIframe();
         }
 
         function navigateIframe() {
-            const userPath = document.getElementById("url-bar").value;
-            // Remove leading slash if present to avoid double slashes
-            const cleanPath = userPath.replace(/^\//, '');
-            const fullUrl = `/sandboxes/${selectedSandbox}/proxy/${cleanPath}`;
-            document.getElementById("sandbox-iframe").src = fullUrl;
+            if (!selectedSandbox) return;
+            
+            // Get the sandbox URL from the sandbox info
+            const sandboxInfo = document.getElementById("sandbox-info");
+            const sandboxUrl = sandboxInfo.getAttribute("data-url");
+            
+            if (!sandboxUrl) {
+                document.getElementById("sandbox-iframe").src = "";
+                return;
+            }
+            
+            const urlBar = document.getElementById("url-bar");
+            const userPath = urlBar.value;
+            
+            // If the user has modified the URL bar to a different domain, use that
+            if (userPath.startsWith("http://") || userPath.startsWith("https://")) {
+                document.getElementById("sandbox-iframe").src = userPath;
+                return;
+            }
+            
+            // Otherwise, use the sandbox URL
+            document.getElementById("sandbox-iframe").src = sandboxUrl;
         }
 
         async function fetchLogs() {
@@ -901,16 +932,31 @@
         function goBack() {
             const iframe = document.getElementById("sandbox-iframe");
             iframe.contentWindow.history.back();
+            // Update URL bar after navigation
+            setTimeout(() => {
+                const urlBar = document.getElementById("url-bar");
+                urlBar.value = iframe.contentWindow.location.href;
+            }, 100);
         }
 
         function goForward() {
             const iframe = document.getElementById("sandbox-iframe");
             iframe.contentWindow.history.forward();
+            // Update URL bar after navigation
+            setTimeout(() => {
+                const urlBar = document.getElementById("url-bar");
+                urlBar.value = iframe.contentWindow.location.href;
+            }, 100);
         }
 
         function refreshIframe() {
             const iframe = document.getElementById("sandbox-iframe");
             iframe.contentWindow.location.reload();
+            // Update URL bar after refresh
+            setTimeout(() => {
+                const urlBar = document.getElementById("url-bar");
+                urlBar.value = iframe.contentWindow.location.href;
+            }, 100);
         }
 
         async function loadUserInfo() {
@@ -946,6 +992,13 @@
             connectSSE();
             loadSandboxes();
             loadUserInfo();
+            
+            // Add event listener to iframe to update URL bar when URL changes
+            const iframe = document.getElementById("sandbox-iframe");
+            iframe.addEventListener('load', function() {
+                const urlBar = document.getElementById("url-bar");
+                urlBar.value = iframe.contentWindow.location.href;
+            });
         });
 
         // Clean up SSE connection when page unloads

@@ -23,6 +23,7 @@ GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 GITHUB_REDIRECT_URI = os.getenv("GITHUB_REDIRECT_URI")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
+SANDBOX_VHOST = os.getenv("SANDBOX_VHOST")
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -66,8 +67,9 @@ app.add_middleware(
     secret_key=SESSION_SECRET,
     session_cookie="SID",
     max_age=24 * 60 * 60,  # 24 hours
-    same_site="lax",
-    https_only=True
+    same_site="none",
+    https_only=True,
+    domain=f'.{SANDBOX_VHOST}'
 )
 
 # Add authentication middleware

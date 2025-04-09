@@ -1,0 +1,11 @@
+sandboxer.test {
+	tls internal
+	reverse_proxy http://ubuntu.orb.local:8000
+}
+
+*.sandboxer.test {
+	tls internal
+
+	rewrite * /sandboxes/{labels.2}/proxy{uri}
+	reverse_proxy http://ubuntu.orb.local:8000
+}

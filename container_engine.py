@@ -6,7 +6,7 @@ import tempfile
 import os
 import shutil
 import subprocess
-import uuid
+from ulid import ULID
 import io
 import re
 import time
@@ -481,7 +481,7 @@ class ContainerEngine:
         new_volumes = {}
 
         for mount_path, old_volume in volume_map.items():
-            new_volume = f"{old_volume}_fork_{str(uuid.uuid4())[:8]}"
+            new_volume = f'{old_volume}_fork_{str(ULID()).lower()}'
 
             # Create the new volume
             await self._run_podman_command(['volume', 'create', '--label', f'sbx_id={container_id}', new_volume])
@@ -608,7 +608,7 @@ class ContainerEngine:
         volume_map = await self._get_container_volumes(container_id)
 
         # Step 2: Create snapshot
-        await self._run_podman_command(['container', 'checkpoint', '-c', 'gzip', '-e', snapshot_file, '--ignore-volumes', '--leave-running', container_id])
+        await self._run_podman_command(['container', 'checkpoint', '-c', 'gzip', '-e', snapshot_file, '--ignore-volumes', '--tcp-established', '--leave-running', container_id])
 
         # Step 3: Duplicate volumes
         new_volumes = await self._duplicate_volumes(container_id, volume_map)
@@ -631,7 +631,7 @@ class ContainerEngine:
             except OSError as e:
                 print(f"Failed to delete snapshot {modified_snapshot}: {e}")
 
-        return Container(id=restored_id, ip_address=container_ip, engine=self), modified_snapshot
+        return Container(id=restored_id, name=new_name, ip_address=container_ip, engine=self), modified_snapshot
 
     async def attach_container(self, container_id: str) -> Tuple[asyncio.Event, Callable[[bytes], Awaitable[None]], AsyncIterator[bytes]]:
         """
