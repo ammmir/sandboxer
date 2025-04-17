@@ -1,0 +1,53 @@
+name: Build and Release sandboxer Binary
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - latest
+      - 'v*'
+
+jobs:
+  build:
+    name: Build Binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install required-version defined in pyproject.toml
+        uses: astral-sh/setup-uv@v5
+        with:
+          pyproject-file: "pyproject.toml"
+
+      - name: Compile dependencies
+        run: uv pip compile pyproject.toml -o requirements.txt
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build binary with PyInstaller
+        run: |
+          uv run pyinstaller --onefile sandboxer.py
+
+      - name: Determine release version
+        id: get_version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="latest"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Upload Release Artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.get_version.outputs.version }}
+          tag_name: ${{ steps.get_version.outputs.version }}
+          files: dist/sandboxer
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

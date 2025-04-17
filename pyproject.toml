@@ -13,3 +13,8 @@ dependencies = [
     "uvicorn>=0.34.0",
     "websockets>=15.0.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.12.0",
+]
