@@ -25,17 +25,24 @@ GITHUB_REDIRECT_URI = os.getenv("GITHUB_REDIRECT_URI")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 SANDBOX_VHOST = os.getenv("SANDBOX_VHOST")
 
-class AuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
+class AuthMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ["http", "websocket"]:
+            return await self.app(scope, receive, send)
+
+        path = scope.get("path", "")
+        session = scope.get("session", {})
         protected_prefixes = ["/sandboxes", "/volumes", "/events"]
-        path = request.url.path
         requires_auth = any(path.startswith(prefix) for prefix in protected_prefixes)
         
         if not requires_auth:
-            return await call_next(request)
+            return await self.app(scope, receive, send)
 
         is_public = False
-        user_id = request.session.get("user_id")
+        user_id = session.get("user_id")
 
         # Check if this is a proxy request to a public sandbox
         if path.startswith("/sandboxes/") and "/proxy/" in path:
@@ -58,22 +65,25 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # sandbox is either private or doesn't exist
         if not is_public and not user_id:
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=401,
                 content={"detail": "Authentication required"},
                 headers={"WWW-Authenticate": "Session"}
             )
+            return await response(scope, receive, send)
 
         # Get user from database
         with closing(get_db()) as db:
             user = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
 
             # Add user and network to request state
-            request.state.user = dict(user)
-            request.state.user_id = user_id
-            request.state.network = f"user_{user_id}"
+            scope["state"] = {
+                "user": dict(user),
+                "user_id": user_id,
+                "network": f"user_{user_id}"
+            }
         
-        return await call_next(request)
+        return await self.app(scope, receive, send)
 
 # Add session middleware with secure configuration
 app.add_middleware(AuthMiddleware)
@@ -224,4 +234,4 @@ async def serve_ui(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=443, ssl_keyfile="key.pem", ssl_certfile="cert.pem", timeout_graceful_shutdown=10)
+    uvicorn.run(app, host="0.0.0.0", port=8000, timeout_graceful_shutdown=5)
