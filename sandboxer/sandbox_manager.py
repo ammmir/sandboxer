@@ -13,12 +13,11 @@ import os
 import websockets
 import sqlite3
 
-from container_engine import ContainerEngine, Container
+from .container_engine import ContainerEngine, Container
 
 load_dotenv()
 
 # configuration
-DATABASE = os.getenv('DATABASE', 'sandboxer.sqlite')
 SANDBOX_VHOST = os.getenv("SANDBOX_VHOST")
 IDLE_TIMEOUT = 24*60*60
 CHECK_INTERVAL = 60
@@ -63,83 +62,8 @@ class SSEClientManager:
 
 sse_manager = SSEClientManager()
 
-def init_db():
-    with closing(sqlite3.connect(DATABASE)) as db:
-        # Existing tables
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS sandboxes (
-                id TEXT PRIMARY KEY,
-                name TEXT UNIQUE NOT NULL,
-                label TEXT,
-                image TEXT,
-                network TEXT,
-                parent_id TEXT NULL,
-                last_active_at INTEGER,
-                deleted_at INTEGER NULL,
-                delete_reason TEXT NULL,
-                is_public BOOLEAN DEFAULT FALSE,
-                FOREIGN KEY(network) REFERENCES networks(name)
-            )
-        """)
-        
-        # New tables
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                email TEXT NOT NULL,
-                name TEXT NOT NULL,
-                login TEXT NOT NULL,
-                avatar_url TEXT,
-                access_token TEXT,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            )
-        """)
-        
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS networks (
-                name TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            )
-        """)
-
-        # Command executions table
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS command_executions (
-                id TEXT PRIMARY KEY,
-                sandbox_id TEXT NOT NULL,
-                command TEXT NOT NULL,
-                exit_code INTEGER NOT NULL,
-                executed_at INTEGER NOT NULL,
-                FOREIGN KEY(sandbox_id) REFERENCES sandboxes(id)
-            )
-        """)
-
-        # Command execution logs table with autoincrementing sequence
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS command_execution_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                execution_id TEXT NOT NULL,
-                fd INTEGER NOT NULL,  -- 1 for stdout, 2 for stderr
-                content TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY(execution_id) REFERENCES command_executions(id)
-            )
-        """)
-        
-        # Add indexes
-        db.execute("CREATE INDEX IF NOT EXISTS idx_sandboxes_network ON sandboxes(network)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_networks_user ON networks(user_id)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_command_executions_sandbox ON command_executions(sandbox_id)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_command_execution_logs_execution ON command_execution_logs(execution_id)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_command_execution_logs_created ON command_execution_logs(created_at)")
-        
-        db.commit()
-
 def get_db():
-    db = sqlite3.connect(DATABASE)
+    db = sqlite3.connect(os.getenv('DATABASE'))
     db.row_factory = sqlite3.Row
     return db
 
@@ -247,7 +171,6 @@ async def handle_container_events():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
     await sync_sandbox_states()  # Sync sandbox states before starting idle checker
     asyncio.create_task(terminate_idle_sandboxes())
     asyncio.create_task(handle_container_events())  # Start event handler

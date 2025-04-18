@@ -21,6 +21,7 @@
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
             text-align: center;
+            width: 400px;
         }
 
         h1 {
@@ -39,6 +40,7 @@
             font-size: 1rem;
             font-weight: 500;
             transition: background-color 0.2s;
+            margin-bottom: 1rem;
         }
 
         .github-button:hover {
@@ -49,6 +51,46 @@
             margin-right: 0.75rem;
             width: 24px;
             height: 24px;
+        }
+
+        .token-input {
+            width: 100%;
+            padding: 0.75rem;
+            margin-bottom: 1rem;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 1rem;
+        }
+
+        .token-button {
+            background-color: #0366d6;
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+            width: 100%;
+        }
+
+        .token-button:hover {
+            background-color: #0056b3;
+        }
+
+        .divider {
+            margin: 1.5rem 0;
+            border-top: 1px solid #ddd;
+            position: relative;
+        }
+
+        .divider-text {
+            background: white;
+            padding: 0 1rem;
+            position: absolute;
+            top: -0.75rem;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #666;
         }
     </style>
 </head>
@@ -61,6 +103,38 @@
             </svg>
             Continue with GitHub
         </a>
+
+        <div class="divider">
+            <span class="divider-text">or</span>
+        </div>
+
+        <input type="text" id="token" class="token-input" placeholder="Enter your access token">
+        <button onclick="loginWithToken()" class="token-button">Login with Token</button>
     </div>
+
+    <script>
+        function loginWithToken() {
+            const token = document.getElementById('token').value.trim();
+            if (!token) {
+                alert('Please enter a token');
+                return;
+            }
+            // Send token to server to create a session
+            fetch('/auth/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token })
+            }).then(response => {
+                if (response.ok) {
+                    window.location.reload();
+                } else {
+                    alert('Invalid token');
+                }
+            }).catch(error => {
+                console.error('Login error:', error);
+                alert('Login failed');
+            });
+        }
+    </script>
 </body>
 </html> 

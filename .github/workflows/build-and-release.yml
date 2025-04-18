@@ -31,7 +31,8 @@ jobs:
 
       - name: Build binary with PyInstaller
         run: |
-          uv run pyinstaller --onefile sandboxer.py
+          uv run pyinstaller --onefile sandbox_server.py
+          mv dist/sandbox_server dist/sandboxer
 
       - name: Determine release version
         id: get_version
