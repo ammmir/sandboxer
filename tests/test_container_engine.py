@@ -1,7 +1,7 @@
 import asyncio
 import time
 
-from container_engine import ContainerEngine
+from sandboxer.container_engine import ContainerEngine
 
 async def main():
     engine = ContainerEngine()

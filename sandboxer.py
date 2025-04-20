@@ -20,8 +20,8 @@ import argparse
 import sqlite3
 import sys
 
-from sandboxer import sandbox_manager
-from sandboxer.sandbox_manager import app, get_db
+from sandboxer_server import sandbox_manager
+from sandboxer_server.sandbox_manager import app, get_db
 
 # Default values from environment variables
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")

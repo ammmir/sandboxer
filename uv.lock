@@ -2,6 +2,12 @@ version = 1
 revision = 1
 requires-python = ">=3.13"
 
+[manifest]
+members = [
+    "sandboxer",
+    "sandboxer-sdk",
+]
+
 [[package]]
 name = "altgraph"
 version = "0.17.4"
@@ -490,6 +496,11 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [{ name = "pyinstaller", specifier = ">=6.12.0" }]
+
+[[package]]
+name = "sandboxer-sdk"
+version = "0.1.0"
+source = { editable = "sdk/python" }
 
 [[package]]
 name = "setuptools"

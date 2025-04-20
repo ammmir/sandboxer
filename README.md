@@ -19,6 +19,8 @@ Optionally, for TLS and per-sandbox subdomains:
 Install CRIU using your distribution's package manager:
 
 ```bash
+add-apt-repository ppa:criu/ppa && \
+apt update && \
 apt-get install criu
 ```
 
@@ -121,3 +123,7 @@ sandboxer --vhost sandboxer.example.com
 You can test it out by visiting https://sandboxer.example.com and login with the admin token.
 
 Note that Caddy requires additional configuration for automatic HTTPS with wildcard certificates. For more info see: https://caddyserver.com/docs/automatic-https#wildcard-certificates
+
+## Client SDKs
+
+Python (sync and async) and JavaScript/TypeScript client libraries are available under the `sdk` directory. They haven't been submitted to the relevant package managers yet.

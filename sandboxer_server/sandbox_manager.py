@@ -743,8 +743,8 @@ async def execute_code(req: Request, sandbox_id: str, request: ExecuteRequest, s
 async def proxy_request(sandbox_id_or_name: str, path: str, request: Request):
     with closing(get_db()) as db:
         # Determine if we should look up by ID or name based on the length
-        # Container IDs are typically 12 characters long
-        if len(sandbox_id_or_name) == 12:
+        # Container IDs are typically 64 characters long
+        if len(sandbox_id_or_name) == 64:
             # Look up by ID
             sandbox = db.execute(
                 "SELECT * FROM sandboxes WHERE id = ? AND deleted_at IS NULL",
@@ -873,8 +873,8 @@ async def delete_sandbox(sandbox_id: str, req: Request):
 async def proxy_websocket(websocket: WebSocket, sandbox_id_or_name: str, path: str):
     with closing(get_db()) as db:
         # Determine if we should look up by ID or name based on the length
-        # Container IDs are typically 12 characters long
-        if len(sandbox_id_or_name) == 12:
+        # Container IDs are typically 64 characters long
+        if len(sandbox_id_or_name) == 64:
             # Look up by ID
             sandbox = db.execute(
                 "SELECT * FROM sandboxes WHERE id = ? AND deleted_at IS NULL",

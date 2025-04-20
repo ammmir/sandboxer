@@ -6,7 +6,7 @@ import termios
 import os
 import uuid
 
-from container_engine import ContainerEngine
+from sandboxer.container_engine import ContainerEngine
 
 def setup_terminal():
     """Set up terminal for raw input mode."""

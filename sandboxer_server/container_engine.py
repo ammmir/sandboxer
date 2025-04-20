@@ -172,7 +172,13 @@ class ContainerEngine:
         print(f'Executing: {" ".join(command)}')
 
         def run_in_thread():
-            return subprocess.run(command, capture_output=True, text=True)
+            process = subprocess.run(command, capture_output=True, text=True)
+            # Log stdout and stderr
+            if process.stdout:
+                print(f'stdout: {process.stdout}')
+            if process.stderr:
+                print(f'stderr: {process.stderr}')
+            return process
 
         try:
             process = await asyncio.to_thread(run_in_thread)
