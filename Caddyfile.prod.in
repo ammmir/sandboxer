@@ -1,0 +1,21 @@
+{
+	log {
+		output stdout
+		format console
+		level INFO
+	}
+}
+
+SANDBOX_VHOST {
+	header -Server
+	encode zstd gzip
+	reverse_proxy http://HOST_PORT
+}
+
+*.SANDBOX_VHOST {
+	header -Server
+	encode zstd gzip
+
+	rewrite * /sandboxes/{labels.2}/proxy{uri}
+	reverse_proxy http://HOST_PORT
+}

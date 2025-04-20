@@ -18,6 +18,7 @@ import websockets
 import secrets
 import argparse
 import sqlite3
+import sys
 
 from sandboxer import sandbox_manager
 from sandboxer.sandbox_manager import app, get_db
@@ -27,7 +28,6 @@ GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 GITHUB_REDIRECT_URI = os.getenv("GITHUB_REDIRECT_URI")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
-SANDBOX_VHOST = os.getenv("SANDBOX_VHOST")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # Global auth methods configuration
@@ -431,18 +431,39 @@ if __name__ == "__main__":
     import uvicorn
     
     parser = argparse.ArgumentParser(description="Sandbox Server")
-    parser.add_argument("--host", "-H", default="0.0.0.0", help="Host to listen on")
+    parser.add_argument("--host", "-H", default="127.0.0.1", help="Host to listen on")
     parser.add_argument("--port", "-p", type=int, default=8000, help="Port to listen on")
-    parser.add_argument("--vhost", default=SANDBOX_VHOST, help="Virtual host domain")
+    parser.add_argument("--vhost", default=os.getenv("SANDBOX_VHOST"), help="Virtual host domain")
     parser.add_argument("--auth", action="append", choices=["token", "github"], 
                        help="Authentication methods (can be specified multiple times)")
     parser.add_argument("--db", default=os.getenv('DATABASE', 'sandboxer.sqlite'), help="Database file path")
+    parser.add_argument("--generate-caddy-config", action="store_true", 
+                       help="Generate Caddy configuration")
     
     args = parser.parse_args()
     
+    # Handle --generate-caddy-config first
+    if args.generate_caddy_config:
+        template_path = Path(__file__).resolve().parent / "Caddyfile.prod.in"
+        if not template_path.exists():
+            print(f"Error: {template_path} not found", file=sys.stderr)
+            sys.exit(1)
+            
+        vhost = args.vhost
+        if not vhost:
+            print("Error: SANDBOX_VHOST not set", file=sys.stderr)
+            sys.exit(1)
+            
+        with open(template_path) as f:
+            content = f.read()
+            content = content.replace("SANDBOX_VHOST", vhost)
+            content = content.replace("HOST_PORT", f"{args.host}:{args.port}")
+            print(content)
+        sys.exit(0)
+    
     # Update SANDBOX_VHOST if provided via command line
     if args.vhost:
-        SANDBOX_VHOST = args.vhost
+        os.environ["SANDBOX_VHOST"] = args.vhost
     
     # Set DATABASE environment variable if --db is provided
     if args.db:
@@ -461,7 +482,7 @@ if __name__ == "__main__":
         max_age=24 * 60 * 60,  # 24 hours
         same_site="none",
         https_only=True,
-        domain=f'.{SANDBOX_VHOST}'
+        domain=f'.{os.getenv("SANDBOX_VHOST")}'
     )
     
     # Create database if needed

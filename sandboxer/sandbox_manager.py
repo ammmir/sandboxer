@@ -17,8 +17,7 @@ from .container_engine import ContainerEngine, Container
 
 load_dotenv()
 
-# configuration
-SANDBOX_VHOST = os.getenv("SANDBOX_VHOST")
+# configuration 
 IDLE_TIMEOUT = 24*60*60
 CHECK_INTERVAL = 60
 PROXY_TIMEOUT = 30
@@ -207,7 +206,7 @@ async def get_sandboxes(request: Request):
             if not row['deleted_at']:
                 container = await engine.get_container(row['id'])
                 # Construct the URL for the sandbox
-                sandbox_url = f"https://{row['name']}.{SANDBOX_VHOST}"
+                sandbox_url = f"https://{row['name']}.{os.getenv('SANDBOX_VHOST')}"
                 
                 sandboxes.append({
                     "id": row['id'],
@@ -391,7 +390,7 @@ async def get_sandbox(sandbox_id: str, req: Request):
                 }
             
             # Construct the URL for the sandbox
-            sandbox_url = f"https://{container.name}.{SANDBOX_VHOST}"
+            sandbox_url = f"https://{container.name}.{os.getenv('SANDBOX_VHOST')}"
             
             return {
                 "id": container.id,

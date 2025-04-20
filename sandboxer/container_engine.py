@@ -42,7 +42,7 @@ class Container:
         ])
 
 class ContainerEngine:
-    def __init__(self, podman_path: str = 'podman --runtime /usr/sbin/run2'):
+    def __init__(self, podman_path: str = 'podman'):
         self.podman_path = podman_path.split()
         self.inspect_cache = {}
         self._events_task = None

@@ -31,7 +31,7 @@ jobs:
 
       - name: Build binary with PyInstaller
         run: |
-          uv run pyinstaller --onefile sandbox_server.py
+          uv run pyinstaller --add-data Caddyfile.prod.in:. --add-data static:static --onefile sandbox_server.py
           mv dist/sandbox_server dist/sandboxer
 
       - name: Determine release version
