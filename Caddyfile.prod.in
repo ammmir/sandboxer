@@ -4,6 +4,10 @@
 		format console
 		level INFO
 	}
+
+	dns PROVIDER TOKEN
+
+	email ACME_EMAIL
 }
 
 SANDBOX_VHOST {
@@ -16,6 +20,10 @@ SANDBOX_VHOST {
 	header -Server
 	encode zstd gzip
 
-	rewrite * /sandboxes/{labels.2}/proxy{uri}
+	tls {
+		resolvers 8.8.8.8 8.8.4.4
+	}
+
+	rewrite * /sandboxes/{labels.3}/proxy{uri}
 	reverse_proxy http://HOST_PORT
 }

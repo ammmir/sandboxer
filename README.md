@@ -110,7 +110,14 @@ dpkg -i caddy_2.10.0_linux_amd64.deb
 Generate the Caddy configuration:
 
 ```bash
-sandboxer --vhost sandboxer.example.com --generate-caddy-config > /etc/caddy/Caddyfile && \
+sandboxer --vhost sandboxer.example.com --generate-caddy-config > /etc/caddy/Caddyfile
+```
+
+Edit `/etc/caddy/Caddyfile` and update your DNS provider settings and specify the required email address for TLS certificate issuance. For instance, if you're using Cloudflare DNS, you'd use `dns cloudflare API_TOKEN_FROM_CLOUDFLARE`, etc.
+
+Finally, restart Caddy:
+
+```bash
 service caddy restart
 ```
 
