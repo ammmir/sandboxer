@@ -195,6 +195,7 @@
         let term = null;
         let terminalWs = null;
         let terminalDataHandler = null;
+        let currentTab = 'exec';
 
         // Add SSE connection management
         let eventSource = null;
@@ -786,6 +787,11 @@
         function closeCreateModal() { document.getElementById("create-modal").classList.add("hidden"); }
 
         function switchTab(tab) {
+            if (currentTab === tab) {
+                return; // Ignore if clicking the same tab
+            }
+            currentTab = tab; // Update current tab
+
             // Update tab styling
             document.getElementById("exec-tab").classList.toggle("bg-white", tab === "exec");
             document.getElementById("exec-tab").classList.toggle("bg-gray-100", tab !== "exec");
