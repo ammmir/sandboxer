@@ -19,9 +19,10 @@ import secrets
 import argparse
 import sqlite3
 import sys
+import logging
 
 from sandboxer_server import sandbox_manager
-from sandboxer_server.sandbox_manager import app, get_db
+from sandboxer_server.sandbox_manager import app, get_db, quota
 
 # Default values from environment variables
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
@@ -29,6 +30,8 @@ GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 GITHUB_REDIRECT_URI = os.getenv("GITHUB_REDIRECT_URI")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+QUOTA_BLOCK_HARD = int(os.getenv("QUOTA_BLOCK_HARD", "1073741824")) # 1GB
+QUOTA_INODE_HARD = int(os.getenv("QUOTA_INODE_HARD", "1000000")) # 1M inodes
 
 # Global auth methods configuration
 AUTH_METHODS = {"token"}  # Default to token auth
@@ -128,12 +131,21 @@ async def auth_github():
     return RedirectResponse(github_auth_url)
 
 async def create_network_bg(network_name: str):
-    """Background task to create network, ignoring errors"""
+    """Background task to create network and project entry, ignoring errors"""
     try:
+        # Create network first
         await sandbox_manager.engine.create_network(network_name)
         print(f"Network created: {network_name}")
     except Exception as e:
-        print(f"Network creation failed (ignoring): {e}")
+        print(f"Network/project creation failed (ignoring): {e}")
+
+    # Add project entry if quota is supported
+    if quota.is_supported():
+        print(f"Adding project entry for network: {network_name}")
+        await quota.add_project(network_name, block_hard=QUOTA_BLOCK_HARD, inode_hard=QUOTA_INODE_HARD)
+        print(f"Project entry created for network: {network_name}")
+    else:
+        print(f"Quota is not supported, skipping project entry creation for network: {network_name}")
 
 @app.get("/auth/github/callback", include_in_schema=False)
 async def auth_github_callback(code: str, request: Request):
@@ -421,7 +433,7 @@ async def first_run():
         db.commit()
 
     # Create network in background
-    asyncio.create_task(create_network_bg(network_name))
+    await create_network_bg(network_name)
 
     print("\nInitial admin token created!")
     print(f"Token: {token}")
@@ -484,8 +496,10 @@ if __name__ == "__main__":
         https_only=True,
         domain=f'.{os.getenv("SANDBOX_VHOST")}'
     )
+
+    logging.getLogger("asyncio").setLevel(logging.DEBUG)
     
     # Create database if needed
-    asyncio.run(first_run())
+    asyncio.run(first_run(), debug=True)
     
     uvicorn.run(app, host=args.host, port=args.port, timeout_graceful_shutdown=5)

@@ -14,6 +14,7 @@ import websockets
 import sqlite3
 
 from .container_engine import ContainerEngine, Container
+from .quota_manager import QuotaManager
 
 load_dotenv()
 
@@ -22,7 +23,8 @@ IDLE_TIMEOUT = 24*60*60
 CHECK_INTERVAL = 60
 PROXY_TIMEOUT = 30
 
-engine = ContainerEngine()
+quota = QuotaManager()
+engine = ContainerEngine(quota=quota)
 hx = httpx.AsyncClient()
 
 # Add SSE client management
@@ -249,7 +251,8 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
             env=request.env, 
             args=request.args,
             interactive=request.interactive,
-            network=req.state.network
+            network=req.state.network,
+            quota_projname=req.state.network
         )
         
         with closing(get_db()) as db:

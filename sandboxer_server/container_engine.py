@@ -11,6 +11,8 @@ import io
 import re
 import time
 
+from .quota_manager import QuotaManager
+
 class Container:
     def __init__(self, engine: 'ContainerEngine', **kwargs):
         self.engine = engine
@@ -33,16 +35,14 @@ class Container:
         return await self.engine.logs(self.id, stream=stream)
 
     async def stop(self) -> None:
-        #await self.engine._run_podman_command(['stop', '--time', '3', self.id])
-        await self.engine._run_podman_command(['kill', '-s', 'KILL', self.id])
+        await self.engine.stop_container(self.id)
 
     async def snapshot(self, image_path: str) -> None:
-        await self.engine._run_podman_command([
-            'container', 'checkpoint', '-e', image_path, '--leave-running', '--ignore-volumes', self.id
-        ])
+        await self.engine.snapshot_container(self.id, image_path)
 
 class ContainerEngine:
-    def __init__(self, podman_path: str = 'podman'):
+    def __init__(self, quota: QuotaManager, podman_path: str = 'podman'):
+        self.quota = quota
         self.podman_path = podman_path.split()
         self.inspect_cache = {}
         self._events_task = None
@@ -172,18 +172,26 @@ class ContainerEngine:
         print(f'Executing: {" ".join(command)}')
 
         def run_in_thread():
+            print("ENTER run_in_thread")
             process = subprocess.run(command, capture_output=True, text=True)
             # Log stdout and stderr
             if process.stdout:
                 print(f'stdout: {process.stdout}')
             if process.stderr:
                 print(f'stderr: {process.stderr}')
+            print("EXIT run_in_thread")
             return process
 
         try:
-            process = await asyncio.to_thread(run_in_thread)
+            print("before run_in_thread")
+            loop = asyncio.get_running_loop()
+            process = await loop.run_in_executor(None, run_in_thread)
+            print("after run_in_thread")
         except asyncio.TimeoutError:
+            print("TIMEOUT")
             raise RuntimeError(f"Podman command timed out: {' '.join(command)}")
+
+        print("process exit code: ", process.returncode)
 
         if process.returncode != 0:
             raise RuntimeError(f"Podman command failed: {process.stderr.strip()}")
@@ -359,41 +367,73 @@ class ContainerEngine:
         output = await self._run_podman_command(['network', 'inspect', name])
         return json.loads(output)[0]
 
-    async def start_container(self, image: str, name: str, env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False) -> Container:
+    async def start_container(self, image: str, name: str, quota_projname: str, env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False) -> Container:
         """
-        Start a new container using `podman run -d`.
+        Start a new container using `podman create` and `podman start`.
         Returns a `Container` object with its assigned IP address.
+        
+        Args:
+            image: Container image to use
+            name: Container name
+            quota_projname: Project name to use for quota management
+            env: Environment variables
+            args: Additional container arguments
+            network: Network to connect to
+            interactive: Whether to run in interactive mode
         """
-        args_list = [
-            'run',
-            '-d',  # Run in detached mode
+        # First create the container
+        create_args = [
+            'create',
             '--security-opt', 'seccomp=unconfined',
             '--name', name,  # Container name
+            '--label', f'quota_projname={quota_projname}',  # Store quota project name in labels
         ]
 
         # Add interactive mode if requested
         if interactive:
-            args_list.extend(['-it'])  # Add -it for interactive mode
+            create_args.extend(['-it'])  # Add -it for interactive mode
 
         # Add network if specified
         if network:
-            args_list.extend(['--network', network])
+            create_args.extend(['--network', network])
 
         # Add environment variables if provided
         if env:
             for key, value in env.items():
-                args_list.extend(['-e', f'{key}={value}'])
+                create_args.extend(['-e', f'{key}={value}'])
 
-        args_list.append(f'docker://{image}')  # The image to run
+        create_args.append(f'docker://{image}')  # The image to run
 
         # Add additional container arguments if provided
         if args:
-            args_list.extend(args)
+            create_args.extend(args)
         
-        container_id = await self._run_podman_command(args_list)
+        container_id = await self._run_podman_command(create_args)
+
+        # Set quota before starting
+        if self.quota.is_supported():
+            # Get the container's UpperDir (writable layer)
+            container_info = await self._get_container_info(container_id)
+            upper_dir = container_info["GraphDriver"]["Data"]["UpperDir"]
+            await self.quota.apply(upper_dir, quota_projname)
+
+        # Start the container
+        await self._run_podman_command(['start', container_id])
+
+        # Apply quota project settings after container startup
+        if self.quota.is_supported():
+            await self.quota.apply2(quota_projname)
+        
         container_ip, exposed_port = await self._get_container_ip(container_id)
 
-        return Container(id=container_id, ip_address=container_ip, exposed_port=exposed_port, engine=self)
+        return Container(
+            engine=self,
+            id=container_id,
+            ip_address=container_ip,
+            exposed_port=exposed_port,
+            name=name,
+            image=image
+        )
 
     async def _get_container_ip(self, container_id: str) -> Tuple[str, Optional[str]]:
         """Inspect a container and return its assigned private IP and first exposed port."""
@@ -452,26 +492,70 @@ class ContainerEngine:
             return None  # If the container doesn't exist
 
     async def stop_container(self, container_id: str) -> None:
-        await self._run_podman_command(['stop', '--time', '3', container_id])
+        # Clear quota before stopping
+        if self.quota.is_supported():
+            container_info = await self._get_container_info(container_id)
+            upper_dir = container_info["GraphDriver"]["Data"]["UpperDir"]
+            quota_projname = container_info["Config"]["Labels"].get("quota_projname")
+            if quota_projname:
+                await self.quota.clear_path(upper_dir)
+
+        # Stop the container
+        #await self._run_podman_command(['stop', '--time', '3', container_id])
+        await self._run_podman_command(['kill', '-s', 'KILL', container_id])
 
     async def remove_container(self, container_id: str) -> None:
         await self._run_podman_command(['rm', container_id])
 
     async def snapshot_container(self, container_id: str, image_path: str) -> None:
         await self._run_podman_command([
-            'container', 'checkpoint', '-e', image_path, '--leave-running', '--ignore-volumes', '--tcp-established', '--tcp-skip-in-flight', '--ext-unix-sk', container_id
+            'container', 
+            'checkpoint', 
+            '-e', image_path, 
+            '--leave-running', 
+            '--ignore-volumes', 
+            '--tcp-established', 
+            '--tcp-skip-in-flight', 
+            '--ext-unix-sk', 
+            container_id
         ])
 
-    async def restore_container(self, image_path: str, name: str) -> Container:
+    async def restore_container(self, image_path: str, name: str, quota_projname: str) -> Container:
         """
         Restore a container from a checkpoint image.
         Returns a `Container` object with its assigned IP address.
+        
+        Args:
+            image_path: Path to the checkpoint image
+            name: Name for the restored container
+            quota_projname: Project name to use for quota management
         """
-        args = ['container', 'restore', '-i', image_path, '-n', name, '--ignore-volumes']
+        # Restore the container
+        args = [
+            'container', 'restore',
+            '-i', image_path,
+            '-n', name,
+            '--ignore-volumes',
+            '--label', f'quota_projname={quota_projname}'  # Store quota project name in labels
+        ]
         container_id = await self._run_podman_command(args)
+
+        # Get the container's UpperDir
+        container_info = await self._get_container_info(container_id)
+        upper_dir = container_info["GraphDriver"]["Data"]["UpperDir"]
+
+        # Set quota after restoring
+        if self.quota.is_supported():
+            await self.quota.apply(upper_dir, quota_projname)
+
         container_ip = await self._get_container_ip(container_id)
 
-        return Container(id=container_id, ip_address=container_ip, engine=self)
+        return Container(
+            engine=self,
+            id=container_id,
+            ip_address=container_ip,
+            name=name
+        )
 
     async def _get_container_volumes(self, container_id: str) -> Dict[str, str]:
         """Find named volumes attached to a container."""
@@ -608,6 +692,12 @@ class ContainerEngine:
 
         If `keep_snapshot=True`, the snapshot file will be retained after forking.
         """
+        # Get the original container's quota project name
+        container_info = await self._get_container_info(container_id)
+        quota_projname = container_info["Config"]["Labels"].get("quota_projname")
+        if not quota_projname:
+            raise RuntimeError("Original container has no quota project name")
+
         snapshot_file = f"{new_name}.tar.gz"
 
         # Step 1: Get container volume mappings
@@ -622,8 +712,13 @@ class ContainerEngine:
         # Step 4: Modify the snapshot metadata
         modified_snapshot = self._edit_checkpoint(snapshot_file, volume_map, new_volumes)
 
-        # Step 5: Restore the modified checkpoint
-        restored_id = await self._run_podman_command(['container', 'restore', '-i', modified_snapshot, '--ignore-volumes', '-n', new_name])
+        # Step 5: Restore the modified checkpoint with the same quota project name
+        restored_id = await self._run_podman_command([
+            'container', 'restore',
+            '-i', modified_snapshot,
+            '--ignore-volumes',
+            '-n', new_name
+        ])
 
         container_ip = await self._get_container_ip(restored_id)
 

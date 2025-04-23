@@ -5,6 +5,7 @@ description = "Code sandboxing made easy"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "aiofiles>=24.1.0",
     "fastapi[standard]>=0.115.11",
     "httpx>=0.28.1",
     "itsdangerous>=2.2.0",
