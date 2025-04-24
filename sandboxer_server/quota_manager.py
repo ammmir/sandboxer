@@ -53,6 +53,7 @@ class QuotaManager:
                             continue
 
     def is_supported(self) -> bool:
+        return False
         return self._quota_supported
 
     async def _get_next_projid(self) -> int:

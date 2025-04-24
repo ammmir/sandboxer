@@ -172,26 +172,19 @@ class ContainerEngine:
         print(f'Executing: {" ".join(command)}')
 
         def run_in_thread():
-            print("ENTER run_in_thread")
             process = subprocess.run(command, capture_output=True, text=True)
             # Log stdout and stderr
-            if process.stdout:
-                print(f'stdout: {process.stdout}')
-            if process.stderr:
-                print(f'stderr: {process.stderr}')
-            print("EXIT run_in_thread")
+            #if process.stdout:
+            #    print(f'stdout: {process.stdout}')
+            #if process.stderr:
+            #    print(f'stderr: {process.stderr}')
             return process
 
         try:
-            print("before run_in_thread")
             loop = asyncio.get_running_loop()
             process = await loop.run_in_executor(None, run_in_thread)
-            print("after run_in_thread")
         except asyncio.TimeoutError:
-            print("TIMEOUT")
             raise RuntimeError(f"Podman command timed out: {' '.join(command)}")
-
-        print("process exit code: ", process.returncode)
 
         if process.returncode != 0:
             raise RuntimeError(f"Podman command failed: {process.stderr.strip()}")
@@ -384,6 +377,7 @@ class ContainerEngine:
         # First create the container
         create_args = [
             'create',
+            '--storage-opt', f'size=5g',
             '--security-opt', 'seccomp=unconfined',
             '--name', name,  # Container name
             '--label', f'quota_projname={quota_projname}',  # Store quota project name in labels
