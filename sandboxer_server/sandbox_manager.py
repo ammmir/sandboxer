@@ -13,7 +13,7 @@ import os
 import websockets
 import sqlite3
 
-from .container_engine import ContainerEngine, Container
+from .container_engine import ContainerEngine, Container, ContainerConfig
 from .quota_manager import QuotaManager
 
 load_dotenv()
@@ -252,7 +252,8 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
             args=request.args,
             interactive=request.interactive,
             network=req.state.network,
-            quota_projname=req.state.network
+            quota_projname=req.state.network,
+            config=ContainerConfig() # use defaults
         )
         
         with closing(get_db()) as db:

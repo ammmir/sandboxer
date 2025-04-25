@@ -13,6 +13,14 @@ import time
 
 from .quota_manager import QuotaManager
 
+class ContainerConfig:
+    def __init__(self):
+        self.capabilities = os.getenv("DEFAULT_CAPABILITIES", "NET_BIND_SERVICE,CAP_CHOWN,CAP_IPC_LOCK,CAP_SETGID,CAP_SETUID,CAP_SYS_CHROOT,CAP_SYS_NICE,CAP_SYS_PTRACE,CAP_DAC_READ_SEARCH,CAP_FOWNER").split(',')
+        self.cpus = os.getenv("DEFAULT_CPUS", "0.5")
+        self.memory = os.getenv("DEFAULT_MEMORY", "512m")
+        self.pids_limit = os.getenv("DEFAULT_PIDS_LIMIT", "1024")
+        self.storage_size = os.getenv("DEFAULT_STORAGE_SIZE", "5g")
+
 class Container:
     def __init__(self, engine: 'ContainerEngine', **kwargs):
         self.engine = engine
@@ -360,7 +368,7 @@ class ContainerEngine:
         output = await self._run_podman_command(['network', 'inspect', name])
         return json.loads(output)[0]
 
-    async def start_container(self, image: str, name: str, quota_projname: str, env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False) -> Container:
+    async def start_container(self, image: str, name: str, quota_projname: str, config: 'ContainerConfig', env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False) -> Container:
         """
         Start a new container using `podman create` and `podman start`.
         Returns a `Container` object with its assigned IP address.
@@ -369,6 +377,7 @@ class ContainerEngine:
             image: Container image to use
             name: Container name
             quota_projname: Project name to use for quota management
+            config: Container configuration object
             env: Environment variables
             args: Additional container arguments
             network: Network to connect to
@@ -377,11 +386,22 @@ class ContainerEngine:
         # First create the container
         create_args = [
             'create',
-            '--storage-opt', f'size=5g',
-            '--security-opt', 'seccomp=unconfined',
+            '--storage-opt', f'size={config.storage_size}',
+            #'--security-opt', 'seccomp=unconfined',
+            '--cap-drop=ALL',
+            '--security-opt', 'no-new-privileges',
+            '--cpus', config.cpus,
+            '--memory', config.memory,
+            '--image-volume', 'ignore',
+            '--pids-limit', config.pids_limit,
             '--name', name,  # Container name
             '--label', f'quota_projname={quota_projname}',  # Store quota project name in labels
         ]
+
+        # Add capabilities from config
+        for cap in config.capabilities:
+            if cap.strip():  # Skip empty strings
+                create_args.extend(['--cap-add', cap.strip()])
 
         # Add interactive mode if requested
         if interactive:
