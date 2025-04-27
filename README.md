@@ -33,6 +33,13 @@ wget https://github.com/mgoltzsche/podman-static/releases/download/v5.4.2/podman
 tar --strip-components=1 -C / -zxvf podman-linux-amd64.tar.gz
 ```
 
+Create the subordinate UID and GID mappings:
+
+```bash
+echo "containers:2147483647:2147483648" >> /etc/subuid && \
+echo "containers:2147483647:2147483648" >> /etc/subgid
+```
+
 ## Quick Start
 
 Download the latest release:

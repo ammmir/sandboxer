@@ -1,5 +1,5 @@
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, PlainTextResponse, FileResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, File, UploadFile
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, PlainTextResponse, FileResponse, RedirectResponse, Response
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from contextlib import asynccontextmanager, closing
@@ -12,6 +12,8 @@ import json
 import os
 import websockets
 import sqlite3
+from datetime import datetime
+import aiofiles
 
 from .container_engine import ContainerEngine, Container, ContainerConfig
 from .quota_manager import QuotaManager
@@ -253,7 +255,7 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
             interactive=request.interactive,
             network=req.state.network,
             quota_projname=req.state.network,
-            config=ContainerConfig() # use defaults
+            config=ContainerConfig(cpus="1.0", memory="2g")
         )
         
         with closing(get_db()) as db:
@@ -1243,6 +1245,108 @@ async def attach_sandbox(websocket: WebSocket, sandbox_id: str):
             await websocket.close(code=4007, reason="Internal server error")
         except Exception:
             pass  # Connection might already be closed
+
+@app.get("/sandboxes/{sandbox_id}/files/{path:path}")
+async def get_files(sandbox_id: str, path: str, req: Request):
+    """Get file content or list directory contents."""
+    with closing(get_db()) as db:
+        # Verify sandbox exists and belongs to user's network
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
+
+        try:
+            # Update last active timestamp
+            db.execute(
+                "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
+                (time.time(), sandbox_id)
+            )
+            db.commit()
+
+            # Get file/directory info
+            info = await engine.stat(sandbox_id, path)
+            
+            if info["is_dir"]:
+                # List directory contents
+                return await engine.list_files(sandbox_id, path)
+            else:
+                # Stream file content
+                content_type, filename, file_path = await engine.get_file(sandbox_id, path)
+                
+                # Create a streaming response with async file reading
+                async def file_stream():
+                    async with aiofiles.open(file_path, 'rb') as f:
+                        while chunk := await f.read(8192):  # Read in 8KB chunks
+                            yield chunk
+                
+                return StreamingResponse(
+                    file_stream(),
+                    media_type=content_type,
+                    headers={
+                        "Content-Disposition": f'attachment; filename="{filename}"'
+                    }
+                )
+                
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/sandboxes/{sandbox_id}/files/{path:path}")
+async def upload_files(
+    sandbox_id: str, 
+    path: str, 
+    req: Request,
+    files: list[UploadFile] = File(...)
+):
+    """Upload files to a directory in the sandbox."""
+    with closing(get_db()) as db:
+        # Verify sandbox exists and belongs to user's network
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
+
+        try:
+            # Update last active timestamp
+            db.execute(
+                "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
+                (time.time(), sandbox_id)
+            )
+            db.commit()
+
+            # Verify the target path is a directory
+            info = await engine.stat(sandbox_id, path)
+            if not info["is_dir"]:
+                raise HTTPException(status_code=400, detail="Target path must be a directory")
+
+            # Upload each file
+            for file in files:
+                if not file.filename:
+                    continue
+
+                # Combine the target directory path with the relative path
+                full_path = os.path.join(path, file.filename).replace('\\', '/')
+                
+                # Create any necessary parent directories
+                parent_dir = os.path.dirname(full_path)
+                if parent_dir:
+                    await engine.mkdir(sandbox_id, parent_dir, parents=True)
+
+                # Stream the file directly to disk
+                await engine.put_file(sandbox_id, full_path, file)
+
+            return {"message": "Files uploaded successfully"}
+
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

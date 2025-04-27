@@ -31,6 +31,31 @@
         </label>
         <ul id="sandbox-tree" class="space-y-2 flex-grow overflow-auto"></ul>
         
+        <!-- File System Explorer -->
+        <div id="file-explorer" class="border-t pt-4 mt-4 hidden" 
+             ondragover="handleDragOver(event)" 
+             ondragleave="handleDragLeave(event)" 
+             ondrop="handleDrop(event)">
+            <h2 class="text-lg font-semibold mb-2">File System</h2>
+            <div class="flex items-center gap-2 mb-2">
+                <button onclick="navigateUp()" class="text-gray-600 hover:text-gray-800" title="Go up">
+                    ⬆
+                </button>
+                <button onclick="document.getElementById('file-upload').click()" class="text-gray-600 hover:text-gray-800" title="Upload files">
+                    📤
+                </button>
+                <button onclick="loadFileSystem(document.getElementById('current-path').value)" class="text-gray-600 hover:text-gray-800" title="Refresh directory">
+                    ↻
+                </button>
+                <input type="file" id="file-upload" class="hidden" webkitdirectory multiple>
+                <input type="text" id="current-path" class="border p-1 text-sm flex-grow" 
+                       onkeydown="handlePathInput(event)" placeholder="Enter path... (⌘P to focus)">
+            </div>
+            <div id="file-list" class="overflow-auto h-64 border rounded">
+                <p class="text-gray-500 p-2">Select a sandbox to view files.</p>
+            </div>
+        </div>
+        
         <!-- Add user info section at bottom -->
         <div id="user-info" class="border-t pt-4 mt-4">
             <div class="flex items-center gap-3">
@@ -498,6 +523,10 @@
                 if (!document.getElementById("terminal-view").classList.contains("hidden")) {
                     connectTerminal();
                 }
+
+                // Show file explorer and load root directory
+                document.getElementById("file-explorer").classList.remove("hidden");
+                loadFileSystem('/');
             } catch (error) {
                 showError(error.message);
             }
@@ -1065,11 +1094,289 @@
             }
         }
 
+        // File System Explorer Functions
+        function handlePathInput(event) {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                const path = document.getElementById("current-path").value.trim();
+                // Ensure path starts with / and ends with / if it's a directory
+                const normalizedPath = path.startsWith('/') ? path : '/' + path;
+                loadFileSystem(normalizedPath);
+                // Defocus the input after navigation
+                event.target.blur();
+            }
+        }
+
+        async function loadFileSystem(path = '/') {
+            if (!selectedSandbox) return;
+            
+            try {
+                // Normalize the path
+                if (!path.startsWith('/')) {
+                    path = '/' + path;
+                }
+                if (path !== '/' && !path.endsWith('/')) {
+                    path += '/';
+                }
+                
+                const response = await fetch(`/sandboxes/${selectedSandbox}/files${path}`);
+                if (!response.ok) throw new Error("Failed to fetch file system");
+                const data = await response.json();
+                
+                const fileList = document.getElementById("file-list");
+                fileList.innerHTML = ''; // Clear existing content
+                
+                // Update current path display
+                document.getElementById("current-path").value = path;
+                
+                // Sort entries: directories first, then files
+                const entries = data.entries.sort((a, b) => {
+                    if (a.is_dir === b.is_dir) return a.name.localeCompare(b.name);
+                    return b.is_dir - a.is_dir;
+                });
+                
+                // Create list items for each entry
+                entries.forEach(entry => {
+                    const item = document.createElement("div");
+                    item.className = "p-1 hover:bg-gray-100 cursor-pointer flex items-center gap-1";
+                    
+                    const icon = document.createElement("span");
+                    icon.textContent = entry.is_dir ? "📁" : "📄";
+                    icon.className = "text-sm";
+                    
+                    const name = document.createElement("span");
+                    name.textContent = entry.name;
+                    name.className = "text-xs";
+                    
+                    item.appendChild(icon);
+                    item.appendChild(name);
+                    
+                    if (entry.is_dir) {
+                        item.onclick = () => loadFileSystem(path + entry.name + '/');
+                    } else {
+                        item.onclick = () => viewFile(path + entry.name);
+                    }
+                    
+                    fileList.appendChild(item);
+                });
+                
+                // Show file explorer if it was hidden
+                document.getElementById("file-explorer").classList.remove("hidden");
+            } catch (error) {
+                console.error("Error loading file system:", error);
+                document.getElementById("file-list").innerHTML = 
+                    `<p class="text-red-500 p-2">Error: ${error.message}</p>`;
+                // Keep the entered path in the input even if it failed
+                document.getElementById("current-path").value = path;
+            }
+        }
+
+        function navigateUp() {
+            const currentPath = document.getElementById("current-path").value;
+            if (currentPath === '/') return;
+            
+            const newPath = currentPath.split('/').slice(0, -2).join('/') + '/';
+            loadFileSystem(newPath);
+        }
+
+        async function viewFile(path) {
+            if (!selectedSandbox) return;
+            
+            try {
+                const response = await fetch(`/sandboxes/${selectedSandbox}/files${path}`);
+                if (!response.ok) throw new Error("Failed to fetch file");
+                
+                // Get the filename and content type
+                const contentDisposition = response.headers.get('Content-Disposition');
+                let filename = path.split('/').pop();
+                if (contentDisposition) {
+                    const matches = contentDisposition.match(/filename="(.+?)"/);
+                    if (matches) filename = matches[1];
+                }
+                const contentType = response.headers.get('Content-Type') || 'application/octet-stream';
+                
+                // Get the file content as a blob
+                const blob = await response.blob();
+                
+                // Create preview modal
+                const modal = document.createElement("div");
+                modal.className = "fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50";
+                modal.innerHTML = `
+                    <div class="bg-white p-6 rounded shadow-md w-3/4 max-h-[80vh] flex flex-col">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-lg font-semibold">${filename}</h3>
+                            <div class="flex gap-2">
+                                <button onclick="downloadFile(this)" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
+                                    Download <span class="text-xs opacity-75">(⌘S)</span>
+                                </button>
+                                <button onclick="closeModal(this)" class="text-gray-500 hover:text-gray-700">
+                                    ✖ <span class="text-xs opacity-75">(Esc)</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="flex-grow overflow-auto">
+                            <div id="preview-content" class="w-full h-full flex justify-center items-center">
+                                Loading preview...
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                // Store the blob and filename in the modal for download
+                modal.dataset.blob = URL.createObjectURL(blob);
+                modal.dataset.filename = filename;
+                
+                // Add modal to document
+                document.body.appendChild(modal);
+                
+                // Add keyboard event listener
+                const handleKeyDown = (e) => {
+                    if (e.key === 'Escape') {
+                        closeModal(modal);
+                    } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                        e.preventDefault(); // Prevent browser save dialog
+                        downloadFile(modal.querySelector('button[onclick="downloadFile(this)"]'));
+                    }
+                };
+                document.addEventListener('keydown', handleKeyDown);
+                
+                // Store the event listener reference in the modal's closure
+                modal.handleKeyDown = handleKeyDown;
+                
+                // Handle preview based on content type
+                const previewContent = modal.querySelector('#preview-content');
+                
+                if (contentType.startsWith('image/')) {
+                    // Image preview
+                    const img = document.createElement('img');
+                    img.src = URL.createObjectURL(blob);
+                    img.className = 'max-w-full max-h-[60vh] object-contain';
+                    img.onload = () => URL.revokeObjectURL(img.src);
+                    previewContent.innerHTML = '';
+                    previewContent.appendChild(img);
+                    
+                } else if (contentType.startsWith('video/')) {
+                    // Video preview
+                    const video = document.createElement('video');
+                    video.src = URL.createObjectURL(blob);
+                    video.controls = true;
+                    video.className = 'max-w-full max-h-[60vh]';
+                    video.onload = () => URL.revokeObjectURL(video.src);
+                    previewContent.innerHTML = '';
+                    previewContent.appendChild(video);
+                    
+                } else if (contentType.startsWith('text/') || 
+                          contentType === 'application/json' || 
+                          contentType === 'application/xml') {
+                    // Text preview
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const pre = document.createElement('pre');
+                        pre.className = 'bg-gray-100 p-4 rounded overflow-auto font-mono text-sm';
+                        pre.textContent = e.target.result;
+                        previewContent.innerHTML = '';
+                        previewContent.appendChild(pre);
+                    };
+                    reader.readAsText(blob);
+                    
+                } else {
+                    // Unsupported type
+                    previewContent.innerHTML = `
+                        <div class="text-center text-gray-500">
+                            <p>Preview not available for this file type.</p>
+                            <p class="text-sm">${contentType}</p>
+                        </div>
+                    `;
+                }
+                
+            } catch (error) {
+                console.error("Error viewing file:", error);
+                showError(`Failed to view file: ${error.message}`);
+            }
+        }
+        
+        function closeModal(buttonOrModal) {
+            const modal = buttonOrModal.classList?.contains('fixed') ? buttonOrModal : buttonOrModal.closest('.fixed');
+            if (!modal) return;
+            
+            // Remove the keyboard event listener
+            if (modal.handleKeyDown) {
+                document.removeEventListener('keydown', modal.handleKeyDown);
+            }
+            // Clean up blob URL
+            URL.revokeObjectURL(modal.dataset.blob);
+            // Remove the modal
+            modal.remove();
+        }
+        
+        function downloadFile(button) {
+            const modal = button.closest('.fixed');
+            const blobUrl = modal.dataset.blob;
+            const filename = modal.dataset.filename;
+            
+            // Create temporary anchor for download
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = filename;
+            a.style.display = 'none';
+            
+            // Add to document, click it, and remove it
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        // Add this function after the loadFileSystem function
+        async function handleFileUpload(event) {
+            if (!selectedSandbox) return;
+            
+            const files = event.target.files;
+            if (!files || files.length === 0) return;
+            
+            const currentPath = document.getElementById("current-path").value;
+            
+            // Create FormData to send files
+            const formData = new FormData();
+            
+            // Add each file to FormData
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                // Get the relative path within the directory
+                const relativePath = file.webkitRelativePath || file.name;
+                formData.append('files', file, relativePath);
+            }
+            
+            try {
+                // Upload to the current path in the sandbox
+                const response = await fetch(`/sandboxes/${selectedSandbox}/files${currentPath}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+                
+                // Refresh the current directory to show new files
+                loadFileSystem(currentPath);
+                
+                // Clear the file input
+                event.target.value = '';
+                
+            } catch (error) {
+                console.error("Error uploading files:", error);
+                showError(`Failed to upload files: ${error.message}`);
+            }
+        }
+
         // Connect to SSE when page loads
         document.addEventListener('DOMContentLoaded', function() {
             connectSSE();
             loadSandboxes();
             loadUserInfo();
+            
+            // Add event listener for file upload
+            document.getElementById('file-upload').addEventListener('change', handleFileUpload);
             
             // Add event listener to iframe to update URL bar when URL changes
             const iframe = document.getElementById("sandbox-iframe");
@@ -1085,6 +1392,101 @@
                 eventSource.close();
             }
         });
+
+        // Add global keyboard shortcut handler
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
+                e.preventDefault();
+                const pathInput = document.getElementById('current-path');
+                if (pathInput) {
+                    pathInput.focus();
+                    pathInput.select();
+                }
+            }
+        });
+
+        // Add these new functions after the handleFileUpload function
+        function handleDragOver(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            // Add visual feedback
+            event.currentTarget.classList.add('border-blue-500', 'bg-blue-50');
+        }
+
+        function handleDragLeave(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            // Remove visual feedback
+            event.currentTarget.classList.remove('border-blue-500', 'bg-blue-50');
+        }
+
+        async function handleDrop(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            
+            // Remove visual feedback
+            event.currentTarget.classList.remove('border-blue-500', 'bg-blue-50');
+            
+            if (!selectedSandbox) {
+                showError("Select a sandbox first.");
+                return;
+            }
+            
+            const items = event.dataTransfer.items;
+            if (!items || items.length === 0) return;
+            
+            const currentPath = document.getElementById("current-path").value;
+            const formData = new FormData();
+            
+            // Process each dropped item
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                if (item.kind === 'file') {
+                    const entry = item.webkitGetAsEntry();
+                    if (entry) {
+                        await processEntry(entry, formData, '');
+                    }
+                }
+            }
+            
+            if (formData.getAll('files').length === 0) return;
+            
+            try {
+                // Upload to the current path in the sandbox
+                const response = await fetch(`/sandboxes/${selectedSandbox}/files${currentPath}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+                
+                // Refresh the current directory to show new files
+                loadFileSystem(currentPath);
+                
+            } catch (error) {
+                console.error("Error uploading files:", error);
+                showError(`Failed to upload files: ${error.message}`);
+            }
+        }
+
+        // Helper function to process directory entries recursively
+        async function processEntry(entry, formData, path) {
+            if (entry.isFile) {
+                const file = await new Promise((resolve) => entry.file(resolve));
+                formData.append('files', file, path + file.name);
+            } else if (entry.isDirectory) {
+                const reader = entry.createReader();
+                const entries = await new Promise((resolve) => {
+                    reader.readEntries(resolve);
+                });
+                
+                for (const childEntry of entries) {
+                    await processEntry(childEntry, formData, path + entry.name + '/');
+                }
+            }
+        }
     </script>
 </body>
 </html>

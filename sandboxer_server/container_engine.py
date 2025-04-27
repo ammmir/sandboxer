@@ -10,16 +10,27 @@ from ulid import ULID
 import io
 import re
 import time
+import aiofiles
+import logging
+
+from uvicorn.config import LOGGING_CONFIG
+from uvicorn.logging import DefaultFormatter
+
+logging.config.dictConfig(LOGGING_CONFIG)
+
+logger = logging.getLogger("uvicorn.error")
 
 from .quota_manager import QuotaManager
 
 class ContainerConfig:
-    def __init__(self):
-        self.capabilities = os.getenv("DEFAULT_CAPABILITIES", "NET_BIND_SERVICE,CAP_CHOWN,CAP_IPC_LOCK,CAP_SETGID,CAP_SETUID,CAP_SYS_CHROOT,CAP_SYS_NICE,CAP_SYS_PTRACE,CAP_DAC_READ_SEARCH,CAP_FOWNER").split(',')
-        self.cpus = os.getenv("DEFAULT_CPUS", "0.5")
-        self.memory = os.getenv("DEFAULT_MEMORY", "512m")
+    def __init__(self, cpus: str = "0.5", memory: str = "512m", storage_size: str = "5g"):
+        self.capabilities = os.getenv("DEFAULT_CAPABILITIES",
+            "NET_BIND_SERVICE,CHOWN,IPC_LOCK,SETGID,SETUID,SETGID,SETPCAP,SYS_CHROOT,SYS_NICE,SYS_PTRACE,DAC_READ_SEARCH,FOWNER,DAC_OVERRIDE,KILL"
+        ).split(',')
+        self.cpus = cpus
+        self.memory = memory
         self.pids_limit = os.getenv("DEFAULT_PIDS_LIMIT", "1024")
-        self.storage_size = os.getenv("DEFAULT_STORAGE_SIZE", "5g")
+        self.storage_size = storage_size
 
 class Container:
     def __init__(self, engine: 'ContainerEngine', **kwargs):
@@ -388,7 +399,7 @@ class ContainerEngine:
         create_args = [
             'create',
             '--storage-opt', f'size={config.storage_size}',
-            #'--security-opt', 'seccomp=unconfined',
+            '--userns=auto',
             '--cap-drop=ALL',
             '--security-opt', 'no-new-privileges',
             '--cpus', config.cpus,
@@ -860,3 +871,232 @@ class ContainerEngine:
         read_task = asyncio.create_task(read_output())
 
         return detach_event, send_data, receive_data  # Return the function, not the coroutine
+
+    async def stat(self, container_id: str, path: str) -> dict:
+        """
+        Get information about a file or directory in the container.
+        Returns a dictionary with file/directory information.
+        """
+        container_info = await self._get_container_info(container_id)
+        merged_dir = container_info["GraphDriver"]["Data"]["MergedDir"]
+        
+        # Normalize and sanitize the path
+        path = os.path.normpath(path)
+        if not path.startswith('/'):
+            path = '/' + path  # Ensure path starts with /
+        
+        # Construct full path and ensure it's within the container
+        full_path = os.path.join(merged_dir, path.lstrip('/'))
+        if not full_path.startswith(merged_dir):
+            raise RuntimeError("Path traversal not allowed")
+        
+        # Check if path exists
+        if not os.path.exists(full_path):
+            raise RuntimeError("Path not found")
+        
+        # Get file info
+        try:
+            stat = os.stat(full_path)
+            is_dir = os.path.isdir(full_path)
+            is_file = os.path.isfile(full_path)
+
+            return {
+                "path": path,
+                "is_dir": is_dir,
+                "is_file": is_file,
+                "size": stat.st_size if is_file else 0,
+                "modified": stat.st_mtime,
+                "mode": stat.st_mode
+            }
+        except (OSError, PermissionError) as e:
+            raise RuntimeError(f"Error getting file info: {str(e)}")
+
+    async def list_files(self, container_id: str, path: str = '/') -> dict:
+        """
+        List files and directories in a container's filesystem.
+        Returns a dictionary with 'entries' containing file/directory information.
+        """
+        # First check if path is a directory
+        info = await self.stat(container_id, path)
+        if not info["is_dir"]:
+            raise RuntimeError("Path is not a directory")
+        
+        container_info = await self._get_container_info(container_id)
+        merged_dir = container_info["GraphDriver"]["Data"]["MergedDir"]
+        full_path = os.path.join(merged_dir, path.lstrip('/'))
+        
+        # List directory contents
+        entries = []
+        try:
+            for entry in os.listdir(full_path):
+                entry_path = os.path.join(full_path, entry)
+                
+                # Skip symlinks entirely
+                if os.path.islink(entry_path):
+                    continue
+                    
+                # Get entry info
+                try:
+                    is_dir = os.path.isdir(entry_path)
+                    size = os.path.getsize(entry_path) if not is_dir else 0
+                    
+                    entries.append({
+                        "name": entry,
+                        "is_dir": is_dir,
+                        "size": size,
+                        "path": os.path.join(path, entry)
+                    })
+                    
+                    # Break after collecting 1000 entries
+                    if len(entries) >= 1000:
+                        break
+                        
+                except (OSError, PermissionError):
+                    # Skip entries we can't access
+                    continue
+                    
+        except FileNotFoundError:
+            raise RuntimeError("Directory not found")
+        except PermissionError:
+            raise RuntimeError("Permission denied")
+        except Exception as e:
+            raise RuntimeError(f"Error listing directory: {str(e)}")
+        
+        return {"entries": entries}
+
+    async def get_file(self, container_id: str, path: str) -> tuple[str, str, str]:
+        """
+        Get the content of a file in the container.
+        Returns a tuple of (content_type, filename, file_path).
+        The actual file content should be streamed using the returned file path.
+        """
+        # First check if path is a file
+        info = await self.stat(container_id, path)
+        if not info["is_file"]:
+            raise RuntimeError("Path is not a file")
+        
+        container_info = await self._get_container_info(container_id)
+        merged_dir = container_info["GraphDriver"]["Data"]["MergedDir"]
+        full_path = os.path.join(merged_dir, path.lstrip('/'))
+        
+        try:
+            # Get filename and content type
+            filename = os.path.basename(path)
+            import mimetypes
+            content_type, _ = mimetypes.guess_type(filename)
+            if not content_type:
+                content_type = 'application/octet-stream'
+            
+            # Return the file path and metadata
+            return content_type, filename, full_path
+            
+        except PermissionError:
+            raise RuntimeError("Permission denied")
+        except Exception as e:
+            raise RuntimeError(f"Error reading file: {str(e)}")
+
+    async def put_file(self, container_id: str, path: str, file_obj) -> None:
+        """
+        Save a file to the container's filesystem by streaming from a file-like object.
+        Sets file permissions to 644 and ownership to the mapped root user inside the container.
+        """
+        container_info = await self._get_container_info(container_id)
+        merged_dir = container_info["GraphDriver"]["Data"]["MergedDir"]
+        full_path = os.path.join(merged_dir, path.lstrip('/'))
+        
+        try:
+            logger.info(f"Starting file upload to container {container_id}: {path}")
+            
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            
+            # Stream the file content to disk using async API
+            async with aiofiles.open(full_path, 'wb') as f:
+                while chunk := await file_obj.read(8192):  # Read in 8KB chunks
+                    await f.write(chunk)
+            
+            # Close the file object
+            await file_obj.close()
+            
+            # Set file permissions to 644 (rw-r--r--)
+            os.chmod(full_path, 0o644)
+            logger.info(f"Set file permissions to 644 for {path}")
+            
+            # Get the mapped UID/GID for root (0) inside the container
+            uid_map = container_info["HostConfig"]["IDMappings"]["UidMap"][0]
+            gid_map = container_info["HostConfig"]["IDMappings"]["GidMap"][0]
+            # Parse the mapping (format: "container_id:host_id:size")
+            container_uid = int(uid_map.split(':')[1])
+            container_gid = int(gid_map.split(':')[1])
+            
+            # Set ownership to the mapped root user inside the container
+            os.chown(full_path, container_uid, container_gid)
+            logger.info(f"Set file ownership to {container_uid}:{container_gid} for {path}")
+                
+        except PermissionError:
+            logger.error(f"Permission denied while uploading file to {path}")
+            raise RuntimeError("Permission denied")
+        except Exception as e:
+            # Ensure file is closed even on error
+            try:
+                await file_obj.close()
+            except:
+                pass
+            logger.error(f"Error writing file {path}: {str(e)}")
+            raise RuntimeError(f"Error writing file: {str(e)}")
+
+    async def mkdir(self, container_id: str, path: str, parents: bool = False) -> None:
+        """
+        Create a directory in the container's filesystem.
+        Sets directory permissions to 755 and ownership to the mapped root user inside the container.
+        
+        Args:
+            container_id: The ID of the container
+            path: The path where the directory should be created
+            parents: If True, create parent directories as needed
+        """
+        container_info = await self._get_container_info(container_id)
+        merged_dir = container_info["GraphDriver"]["Data"]["MergedDir"]
+        full_path = os.path.join(merged_dir, path.lstrip('/'))
+        
+        # Get the mapped UID/GID for root (0) inside the container
+        uid_map = container_info["HostConfig"]["IDMappings"]["UidMap"][0]
+        gid_map = container_info["HostConfig"]["IDMappings"]["GidMap"][0]
+        # Parse the mapping (format: "container_id:host_id:size")
+        container_uid = int(uid_map.split(':')[1])
+        container_gid = int(gid_map.split(':')[1])
+        
+        try:
+            if parents:
+                logger.info(f"Creating directory with parents in container {container_id}: {path}")
+                # Create all parent directories
+                os.makedirs(full_path, exist_ok=True)
+                # Set permissions and ownership for all created directories
+                current = full_path
+                while current != merged_dir:
+                    os.chmod(current, 0o755)  # rwxr-xr-x
+                    os.chown(current, container_uid, container_gid)  # mapped root:root
+                    logger.info(f"Set directory permissions to 755 and ownership to {container_uid}:{container_gid} for {current}")
+                    current = os.path.dirname(current)
+            else:
+                logger.info(f"Creating directory in container {container_id}: {path}")
+                # Check if parent directory exists
+                parent_dir = os.path.dirname(full_path)
+                if not os.path.exists(parent_dir):
+                    logger.error(f"Parent directory does not exist: {parent_dir}")
+                    raise RuntimeError("Parent directory does not exist")
+                os.mkdir(full_path)
+                # Set permissions and ownership for the new directory
+                os.chmod(full_path, 0o755)  # rwxr-xr-x
+                os.chown(full_path, container_uid, container_gid)  # mapped root:root
+                logger.info(f"Set directory permissions to 755 and ownership to {container_uid}:{container_gid} for {path}")
+                
+        except PermissionError:
+            logger.error(f"Permission denied while creating directory {path}")
+            raise RuntimeError("Permission denied")
+        except FileExistsError:
+            logger.error(f"Directory already exists: {path}")
+            raise RuntimeError("Directory already exists")
+        except Exception as e:
+            logger.error(f"Error creating directory {path}: {str(e)}")
+            raise RuntimeError(f"Error creating directory: {str(e)}")
