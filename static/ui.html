@@ -448,6 +448,38 @@
                     runButton.classList.remove("opacity-50", "cursor-not-allowed");
                 }
 
+                // Handle logs tab for interactive sandboxes
+                const logsTab = document.getElementById("logs-tab");
+                if (sb.interactive) {
+                    logsTab.disabled = true;
+                    logsTab.classList.add("opacity-50", "cursor-not-allowed");
+                    logsTab.title = "Logs are disabled for interactive sandboxes";
+                    // If currently on logs tab, switch to exec tab
+                    if (currentTab === "logs") {
+                        switchTab("exec");
+                    }
+                } else {
+                    logsTab.disabled = false;
+                    logsTab.classList.remove("opacity-50", "cursor-not-allowed");
+                    logsTab.title = "";
+                }
+
+                // Handle terminal tab for non-interactive sandboxes
+                const terminalTab = document.getElementById("terminal-tab");
+                if (!sb.interactive) {
+                    terminalTab.disabled = true;
+                    terminalTab.classList.add("opacity-50", "cursor-not-allowed");
+                    terminalTab.title = "Terminal is only available for interactive sandboxes";
+                    // If currently on terminal tab, switch to exec tab
+                    if (currentTab === "terminal") {
+                        switchTab("exec");
+                    }
+                } else {
+                    terminalTab.disabled = false;
+                    terminalTab.classList.remove("opacity-50", "cursor-not-allowed");
+                    terminalTab.title = "";
+                }
+
                 // Load historical command executions
                 await loadCommandExecutions();
                 

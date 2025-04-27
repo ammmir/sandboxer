@@ -405,7 +405,8 @@ async def get_sandbox(sandbox_id: str, req: Request):
                 "parent_id": sandbox['parent_id'],
                 "child_ids": child_ids,
                 "url": sandbox_url,
-                "is_public": bool(sandbox['is_public'])
+                "is_public": bool(sandbox['is_public']),
+                "interactive": container.interactive
             }
         except Exception as e:
             print(e)
@@ -421,38 +422,38 @@ async def get_sandbox_logs(req: Request, sandbox_id: str, stream: bool = False):
         if not sandbox:
             raise HTTPException(status_code=404, detail="Sandbox not found")
 
-        try:
-            container = await engine.get_container(sandbox_id)
-            if not container:
-                return PlainTextResponse("<container terminated>") # TODO retain logs
+        container = await engine.get_container(sandbox_id)
+        if not container:
+            return PlainTextResponse("<container terminated>") # TODO retain logs
 
-            # Update last active timestamp
-            db.execute(
-                "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
-                (time.time(), sandbox_id)
+        if container.interactive:
+            raise HTTPException(status_code=400, detail="Cannot stream logs from interactive sandboxes")
+
+        # Update last active timestamp
+        db.execute(
+            "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
+            (time.time(), sandbox_id)
+        )
+        db.commit()
+
+        if stream:
+            cancel_event = asyncio.Event()
+            
+            async def stream_response():
+                try:
+                    async for line in await container.logs(stream=True, cancel_event=cancel_event):
+                        yield line + "\n"
+                except asyncio.CancelledError:
+                    cancel_event.set()
+                    raise
+
+            return StreamingResponse(
+                stream_response(),
+                media_type="text/event-stream",
+                background=BackgroundTask(lambda: cancel_event.set())
             )
-            db.commit()
-
-            if stream:
-                cancel_event = asyncio.Event()
-                
-                async def stream_response():
-                    try:
-                        async for line in await container.logs(stream=True, cancel_event=cancel_event):
-                            yield line + "\n"
-                    except asyncio.CancelledError:
-                        cancel_event.set()
-                        raise
-
-                return StreamingResponse(
-                    stream_response(),
-                    media_type="text/event-stream",
-                    background=BackgroundTask(lambda: cancel_event.set())
-                )
-            else:
-                return PlainTextResponse(await container.logs())
-        except:
-            raise HTTPException(status_code=404, detail="Sandbox not found")
+        else:
+            return PlainTextResponse(await container.logs())
 
 @app.get("/sandboxes/{sandbox_id}/execution-logs")
 async def get_all_sandbox_logs(sandbox_id: str, req: Request, limit: int = 1000):

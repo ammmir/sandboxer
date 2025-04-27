@@ -35,6 +35,7 @@ class Container:
         self.started_at = kwargs.get("started_at", -1)
         self.exited_at = kwargs.get("exited_at", -1)
         self.command = kwargs.get("command", [])
+        self.interactive = kwargs.get("interactive", False)
 
     async def exec(self, command: Union[str, List[str]], stream: bool = False) -> Union[Tuple[str, str, int], AsyncIterator[Tuple[str, str, int]]]:
         return await self.engine.exec(self.id, command, stream=stream)
@@ -488,6 +489,9 @@ class ContainerEngine:
             first_exposed_port = next(iter(ports.keys()), None) if ports else None
             first_exposed_port = first_exposed_port.split('/')[0] if first_exposed_port else None
 
+            # Check if container is interactive by looking at the TTY flag
+            interactive = data["Config"].get("Tty", False)
+
             return Container(
                 engine=self,
                 id=data["Id"],
@@ -500,7 +504,8 @@ class ContainerEngine:
                 created_at=data.get("Created", -1),
                 started_at=data["State"].get("StartedAt", -1),
                 exited_at=data["State"].get("ExitedAt", -1),
-                command=data["Config"].get("Cmd", [])
+                command=data["Config"].get("Cmd", []),
+                interactive=interactive
             )
         except RuntimeError:
             return None  # If the container doesn't exist
