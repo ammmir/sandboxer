@@ -3,7 +3,7 @@ from pathlib import Path
 import aiofiles
 
 class SubordinateManager:
-    BLOCK_SIZE = 1000
+    BLOCK_SIZE = 65536
 
     def __init__(
         self,

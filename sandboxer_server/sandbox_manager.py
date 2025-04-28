@@ -24,6 +24,7 @@ logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger("uvicorn.error")
 
 from .container_engine import ContainerEngine, Container, ContainerConfig
+from .subordinate_manager import SubordinateManager
 from .quota_manager import QuotaManager
 
 load_dotenv()
@@ -35,6 +36,7 @@ PROXY_TIMEOUT = 30
 
 quota = QuotaManager()
 engine = ContainerEngine(quota=quota)
+subordinate = SubordinateManager()
 hx = httpx.AsyncClient()
 
 # Add SSE client management
@@ -291,6 +293,9 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
     label = request.label if request.label else container_name
     
     try:
+        with closing(get_db()) as db:
+            network_row_id = db.execute("SELECT rowid FROM networks WHERE name = ?", (req.state.network,)).fetchone()['rowid']
+
         container = await engine.start_container(
             image=request.image, 
             name=container_name, 
@@ -298,6 +303,7 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
             args=request.args,
             interactive=request.interactive,
             network=req.state.network,
+            subuid=subordinate.get_subuid(network_row_id),
             quota_projname=req.state.network,
             config=ContainerConfig(cpus="1.0", memory="2g")
         )

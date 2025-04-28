@@ -21,6 +21,7 @@ logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger("uvicorn.error")
 
 from .quota_manager import QuotaManager
+from .subordinate_manager import SubordinateManager
 
 class ContainerConfig:
     def __init__(self, cpus: str = "0.5", memory: str = "512m", storage_size: str = "5g"):
@@ -388,7 +389,7 @@ class ContainerEngine:
         output = await self._run_podman_command(['network', 'inspect', name])
         return json.loads(output)[0]
 
-    async def start_container(self, image: str, name: str, quota_projname: str, config: 'ContainerConfig', env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False) -> Container:
+    async def start_container(self, image: str, name: str, subuid: int, quota_projname: str, config: 'ContainerConfig', env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False) -> Container:
         """
         Start a new container using `podman create` and `podman start`.
         Returns a `Container` object with its assigned IP address.
@@ -407,7 +408,7 @@ class ContainerEngine:
         create_args = [
             'create',
             '--storage-opt', f'size={config.storage_size}',
-            '--userns=auto',
+            '--uidmap', f'0:{subuid}:{SubordinateManager.BLOCK_SIZE}', # gidmap defaults to uidmap
             '--cap-drop=ALL',
             '--security-opt', 'no-new-privileges',
             '--cpus', config.cpus,
@@ -627,7 +628,7 @@ class ContainerEngine:
 
         return new_volumes
 
-    def _edit_checkpoint(self, snapshot_file: str, volume_map: Dict[str, str], new_volumes: Dict[str, str]) -> None:
+    def _edit_checkpoint(self, snapshot_file: str, volume_map: Dict[str, str], new_volumes: Dict[str, str], container_uid: int, container_gid: int) -> None:
         """Modify the checkpoint tar file by creating a new one with updated volume references."""
         temp_output = f"{snapshot_file}.tmp"
         
@@ -646,8 +647,8 @@ class ContainerEngine:
                                 new_volume = new_volumes[mount_path]
                                 content = content.replace(old_volume, new_volume)
                                 content = content.replace(
-                                    f"/var/lib/containers/storage/volumes/{old_volume}/_data",
-                                    f"/var/lib/containers/storage/volumes/{new_volume}/_data"
+                                    f"/containers/storage/volumes/{old_volume}/_data",
+                                    f"/containers/storage/volumes/{new_volume}/_data"
                                 )
                             
                             # Create a new tarinfo with the same metadata but updated size
@@ -655,14 +656,18 @@ class ContainerEngine:
                             new_info = tarfile.TarInfo(member.name)
                             new_info.size = len(new_content)
                             new_info.mode = member.mode
-                            new_info.uid = member.uid
-                            new_info.gid = member.gid
+                            new_info.uid = container_uid
+                            new_info.gid = container_gid
                             new_info.mtime = member.mtime
-                            
+                            logger.info(f"Adding file {member.name} with UID {container_uid} and GID {container_gid}")
+
                             # Add modified content to archive
                             output_archive.addfile(new_info, fileobj=io.BytesIO(new_content))
                         else:
-                            # For all other files, copy them directly
+                            # For all other files, copy them with updated UID/GID
+                            member.uid = container_uid
+                            member.gid = container_gid
+                            logger.info(f"Adding file {member.name} with UID {container_uid} and GID {container_gid}")
                             output_archive.addfile(member, file)
             
             # Replace the original file with our modified version
@@ -676,7 +681,7 @@ class ContainerEngine:
         
         return snapshot_file
 
-    async def _copy_and_modify_container_files(self, parent_id: str, new_id: str) -> None:
+    async def _copy_and_modify_container_files(self, parent_id: str, new_id: str, container_uid: int, container_gid: int) -> None:
         """
         Copy and modify container-specific files from parent to new container.
         This includes /etc/hosts, /etc/resolv.conf, and /etc/hostname.
@@ -703,8 +708,14 @@ class ContainerEngine:
         with open(f"{new_path}/hosts", 'w') as f:
             f.write(hosts_content)
 
+        # Set UID/GID for hosts file
+        os.chown(f"{new_path}/hosts", container_uid, container_gid)
+
         # Copy resolv.conf as is
         shutil.copy2(f"{parent_path}/resolv.conf", f"{new_path}/resolv.conf")
+
+        # Set UID/GID for resolv.conf file
+        os.chown(f"{new_path}/resolv.conf", container_uid, container_gid)
 
         # TODO: hostname needs to be changed at the UTS level or in the CRIU snapshot
         # XXX: running programs may already have called gethostname() so it's pointless
@@ -713,6 +724,9 @@ class ContainerEngine:
         # Copy and modify hostname file
         with open(f"{new_path}/hostname", 'w') as f:
             f.write(new_hostname)
+
+        # Set UID/GID for hostname file
+        os.chown(f"{new_path}/hostname", container_uid, container_gid)
 
     async def fork_container(self, container_id: str, new_name: str, keep_snapshot: bool = False) -> Tuple[Container, str]:
         """
@@ -736,6 +750,15 @@ class ContainerEngine:
         if not quota_projname:
             raise RuntimeError("Original container has no quota project name")
 
+        # Get the mapped UID/GID for root (0) inside the container
+        uid_map = container_info["HostConfig"]["IDMappings"]["UidMap"][0]
+        gid_map = container_info["HostConfig"]["IDMappings"]["GidMap"][0]
+        # Parse the mapping (format: "container_id:host_id:size")
+        container_uid = int(uid_map.split(':')[1])
+        container_gid = int(gid_map.split(':')[1])
+
+        logger.info(f"Forking container {container_id} with UID {container_uid} and GID {container_gid}")
+
         snapshot_file = f"{new_name}.tar.gz"
 
         # Step 1: Get container volume mappings
@@ -748,7 +771,7 @@ class ContainerEngine:
         new_volumes = await self._duplicate_volumes(container_id, volume_map)
 
         # Step 4: Modify the snapshot metadata
-        modified_snapshot = self._edit_checkpoint(snapshot_file, volume_map, new_volumes)
+        modified_snapshot = self._edit_checkpoint(snapshot_file, volume_map, new_volumes, container_uid, container_gid)
 
         # Step 5: Restore the modified checkpoint with the same quota project name
         restored_id = await self._run_podman_command([
@@ -761,7 +784,7 @@ class ContainerEngine:
         container_ip = await self._get_container_ip(restored_id)
 
         # Step 6: Copy and modify container-specific files
-        await self._copy_and_modify_container_files(container_id, restored_id)
+        await self._copy_and_modify_container_files(container_id, restored_id, container_uid, container_gid)
 
         # Delete snapshot if requested
         if not keep_snapshot:
