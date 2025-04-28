@@ -312,6 +312,7 @@ def init_db():
                 deleted_at INTEGER NULL,
                 delete_reason TEXT NULL,
                 is_public BOOLEAN DEFAULT FALSE,
+                status TEXT DEFAULT 'unknown',
                 FOREIGN KEY(network) REFERENCES networks(name)
             )
         """)

@@ -14,6 +14,14 @@ import websockets
 import sqlite3
 from datetime import datetime
 import aiofiles
+import logging
+
+from uvicorn.config import LOGGING_CONFIG
+from uvicorn.logging import DefaultFormatter
+
+logging.config.dictConfig(LOGGING_CONFIG)
+
+logger = logging.getLogger("uvicorn.error")
 
 from .container_engine import ContainerEngine, Container, ContainerConfig
 from .quota_manager import QuotaManager
@@ -129,10 +137,10 @@ async def handle_container_events():
             try:
                 with closing(get_db()) as db:
                     if event["type"] == "container_stopped":
-                        # Mark sandbox as deleted
+                        # Mark sandbox as terminated
                         now = time.time()
                         db.execute(
-                            "UPDATE sandboxes SET deleted_at = ?, delete_reason = 'container_stopped' WHERE id = ? AND deleted_at IS NULL",
+                            "UPDATE sandboxes SET status = 'stopped', deleted_at = ?, delete_reason = 'container_stopped' WHERE id = ? AND deleted_at IS NULL",
                             (now, event["container_id"])
                         )
                         db.commit()
@@ -148,9 +156,45 @@ async def handle_container_events():
                             await sse_manager.broadcast(sandbox["network"], event)
                             
                     elif event["type"] == "container_started":
-                        # Update sandbox status if it exists
+                        # Update sandbox status to running
                         db.execute(
-                            "UPDATE sandboxes SET last_active_at = ? WHERE id = ?",
+                            "UPDATE sandboxes SET status = 'running', last_active_at = ? WHERE id = ?",
+                            (event["timestamp"], event["container_id"])
+                        )
+                        db.commit()
+                        
+                        # Get the network for this sandbox
+                        sandbox = db.execute(
+                            "SELECT network FROM sandboxes WHERE id = ?",
+                            (event["container_id"],)
+                        ).fetchone()
+                        
+                        if sandbox:
+                            # Broadcast the event to all clients in this network
+                            await sse_manager.broadcast(sandbox["network"], event)
+                            
+                    elif event["type"] == "sandbox_paused":
+                        # Update sandbox status to paused
+                        db.execute(
+                            "UPDATE sandboxes SET status = 'paused', last_active_at = ? WHERE id = ? AND deleted_at IS NULL",
+                            (event["timestamp"], event["container_id"])
+                        )
+                        db.commit()
+                        
+                        # Get the network for this sandbox
+                        sandbox = db.execute(
+                            "SELECT network FROM sandboxes WHERE id = ?",
+                            (event["container_id"],)
+                        ).fetchone()
+                        
+                        if sandbox:
+                            # Broadcast the event to all clients in this network
+                            await sse_manager.broadcast(sandbox["network"], event)
+                            
+                    elif event["type"] == "sandbox_unpaused":
+                        # Update sandbox status to running
+                        db.execute(
+                            "UPDATE sandboxes SET status = 'running', last_active_at = ? WHERE id = ? AND deleted_at IS NULL",
                             (event["timestamp"], event["container_id"])
                         )
                         db.commit()
@@ -175,7 +219,7 @@ async def handle_container_events():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await sync_sandbox_states()  # Sync sandbox states before starting idle checker
-    asyncio.create_task(terminate_idle_sandboxes())
+    #asyncio.create_task(terminate_idle_sandboxes())
     asyncio.create_task(handle_container_events())  # Start event handler
     await engine.start()
     yield
@@ -260,7 +304,7 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
         
         with closing(get_db()) as db:
             db.execute(
-                "INSERT INTO sandboxes (id, name, label, image, network, parent_id, last_active_at) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+                "INSERT INTO sandboxes (id, name, label, image, network, parent_id, last_active_at, status) VALUES (?, ?, ?, ?, ?, NULL, ?, 'running')",
                 (container.id, container_name, label, request.image, req.state.network, time.time())
             )
             db.commit()
@@ -1177,7 +1221,7 @@ async def attach_sandbox(websocket: WebSocket, sandbox_id: str):
         await websocket.accept()
 
         # Attach to the container
-        detach_event, send_data, receive_data = await engine.attach_container(sandbox_id)
+        cancel, send_data, receive_data = await engine.attach_container(sandbox_id)
 
         async def forward_output():
             """Forward container output to WebSocket."""
@@ -1190,13 +1234,12 @@ async def attach_sandbox(websocket: WebSocket, sandbox_id: str):
             except Exception as e:
                 print(f"Error forwarding output: {e}")
             finally:
-                if not detach_event.is_set():
-                    detach_event.set()
+                await cancel()
 
         async def forward_input():
             """Forward WebSocket input to container."""
             try:
-                while not detach_event.is_set():
+                while True:
                     try:
                         # Receive data from WebSocket
                         data = await websocket.receive_bytes()
@@ -1214,8 +1257,7 @@ async def attach_sandbox(websocket: WebSocket, sandbox_id: str):
                         print(f"Error forwarding input: {e}")
                         break
             finally:
-                if not detach_event.is_set():
-                    detach_event.set()
+                await cancel()
 
         # Start both forwarding tasks
         output_task = asyncio.create_task(forward_output())
@@ -1345,6 +1387,64 @@ async def upload_files(
 
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/sandboxes/{sandbox_id}/pause")
+async def pause_sandbox(sandbox_id: str, req: Request):
+    with closing(get_db()) as db:
+        # Check if sandbox exists and belongs to user's network
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
+
+        try:
+            container = await engine.get_container(sandbox_id)
+            if not container:
+                raise HTTPException(status_code=404, detail="Sandbox container not found")
+            
+            await container.pause()
+            
+            # Emit pause event
+            await sse_manager.broadcast(req.state.network, {
+                "type": "sandbox_paused",
+                "container_id": sandbox_id,
+                "timestamp": time.time()
+            })
+            
+            return {"id": sandbox_id, "status": "paused"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/sandboxes/{sandbox_id}/pause")
+async def unpause_sandbox(sandbox_id: str, req: Request):
+    with closing(get_db()) as db:
+        # Check if sandbox exists and belongs to user's network
+        sandbox = db.execute(
+            "SELECT * FROM sandboxes WHERE id = ? AND network = ? AND deleted_at IS NULL",
+            (sandbox_id, req.state.network)
+        ).fetchone()
+        if not sandbox:
+            raise HTTPException(status_code=404, detail="Sandbox not found")
+
+        try:
+            container = await engine.get_container(sandbox_id)
+            if not container:
+                raise HTTPException(status_code=404, detail="Sandbox container not found")
+            
+            await container.unpause()
+            
+            # Emit unpause event
+            await sse_manager.broadcast(req.state.network, {
+                "type": "sandbox_unpaused",
+                "container_id": sandbox_id,
+                "timestamp": time.time()
+            })
+            
+            return {"id": sandbox_id, "status": "running"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 

@@ -78,7 +78,8 @@
             <div id="sandbox-actions" class="hidden space-x-2">
                 <button class="bg-gray-500 text-white px-3 py-1 rounded text-sm" onclick="renameSandbox()">✏ Rename</button>
                 <button id="public-toggle" class="bg-purple-500 text-white px-3 py-1 rounded text-sm" onclick="togglePublic()">🔒 Make Public</button>
-                <button class="bg-red-500 text-white px-3 py-1 rounded text-sm" onclick="deleteSandbox()">❌ Stop</button>
+                <button id="pause-toggle" class="bg-yellow-500 text-white px-3 py-1 rounded text-sm" onclick="togglePause()">⏸ Pause</button>
+                <button class="bg-red-500 text-white px-3 py-1 rounded text-sm" onclick="deleteSandbox()">❌ Terminate</button>
                 <button class="bg-purple-500 text-white px-3 py-1 rounded text-sm" onclick="forkSandbox()">🔀 Fork</button>
             </div>
         </div>
@@ -429,6 +430,7 @@
                 
                 // Store the sandbox URL as a data attribute
                 sandboxInfo.setAttribute("data-url", sb.url || "");
+                sandboxInfo.setAttribute("data-status", sb.status);
 
                 // Show action buttons but disable them if terminated
                 const actionsDiv = document.getElementById("sandbox-actions");
@@ -457,6 +459,10 @@
                     publicToggle.classList.remove("bg-green-500");
                     publicToggle.classList.add("bg-purple-500");
                 }
+
+                // Update pause toggle button
+                const pauseToggle = document.getElementById("pause-toggle");
+                pauseToggle.textContent = sb.status === "paused" ? "▶ Unpause" : "⏸ Pause";
 
                 // Disable command execution controls if terminated
                 const execCode = document.getElementById("exec-code");
@@ -1089,6 +1095,40 @@
                 
                 // Refresh sandbox details to update UI
                 selectSandbox(selectedSandbox);
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        async function togglePause() {
+            if (!selectedSandbox) return showError("Select a sandbox first.");
+            try {
+                const sandboxInfo = document.getElementById("sandbox-info");
+                const isPaused = sandboxInfo.getAttribute("data-status") === "paused";
+                
+                const response = await fetch(`/sandboxes/${selectedSandbox}/pause`, {
+                    method: isPaused ? "DELETE" : "PUT"
+                });
+                
+                if (!response.ok) throw new Error(await response.text());
+                
+                // Update the button text and sandbox status
+                const pauseButton = document.getElementById("pause-toggle");
+                if (isPaused) {
+                    pauseButton.textContent = "⏸ Pause";
+                    sandboxInfo.setAttribute("data-status", "running");
+                } else {
+                    pauseButton.textContent = "▶ Unpause";
+                    sandboxInfo.setAttribute("data-status", "paused");
+                }
+                
+                // Refresh sandbox list to update status
+                loadSandboxes();
+                
+                // Wait 500ms before refreshing the status bar
+                setTimeout(() => {
+                    selectSandbox(selectedSandbox);
+                }, 500);
             } catch (error) {
                 showError(error.message);
             }

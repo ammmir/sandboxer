@@ -60,6 +60,12 @@ class Container:
     async def snapshot(self, image_path: str) -> None:
         await self.engine.snapshot_container(self.id, image_path)
 
+    async def pause(self) -> None:
+        await self.engine.pause_sandbox(self.id)
+
+    async def unpause(self) -> None:
+        await self.engine.unpause_sandbox(self.id)
+
 class ContainerEngine:
     def __init__(self, quota: QuotaManager, podman_path: str = 'podman'):
         self.quota = quota
@@ -120,19 +126,21 @@ class ContainerEngine:
                         event = json.loads(line.decode())
                         if event['Type'] == 'container':
                             container_id = event['ID']
+                            logger.debug(f"Container {container_id} {event['Status']}")
+
+                            # Update cache
+                            inspect_output = await self._run_podman_command(['inspect', container_id])
+                            async with self._cache_lock:
+                                self.inspect_cache[container_id] = inspect_output
+
                             if event['Status'] == 'start':
-                                # Container started, update cache
-                                inspect_output = await self._run_podman_command(['inspect', container_id])
-                                async with self._cache_lock:
-                                    self.inspect_cache[container_id] = inspect_output
-                                # Emit start event
                                 await self._emit_event("container_started", container_id)
                             elif event['Status'] == 'died':
-                                # Container died, remove from cache
-                                async with self._cache_lock:
-                                    self.inspect_cache.pop(container_id, None)
-                                # Emit died event
                                 await self._emit_event("container_stopped", container_id)
+                            elif event['Status'] == 'pause':
+                                await self._emit_event("container_paused", container_id)
+                            elif event['Status'] == 'unpause':
+                                await self._emit_event("container_unpaused", container_id)
                     except json.JSONDecodeError:
                         continue
                     except Exception as e:
@@ -230,7 +238,7 @@ class ContainerEngine:
                     exposed_port=exposed_port,
                     engine=self,
                     name=data["Names"][0] if data["Names"] else "unknown",
-                    status=data["State"],
+                    status=data["State"].lower(),  # Convert to lowercase for consistency
                     image=data["Image"],
                     image_id=data["ImageID"],
                     created_at=data["Created"],
@@ -509,7 +517,7 @@ class ContainerEngine:
                 ip_address=ip_address,
                 exposed_port=first_exposed_port,
                 name=data.get("Name", "").lstrip("/"),
-                state=data.get("State", "unknown"),
+                status=data["State"]["Status"].lower(),  # Get status from State.Status
                 image=data.get("Image", "unknown"),
                 image_id=data.get("ImageID", "unknown"),
                 created_at=data.get("Created", -1),
@@ -764,11 +772,11 @@ class ContainerEngine:
 
         return Container(id=restored_id, name=new_name, ip_address=container_ip, engine=self), modified_snapshot
 
-    async def attach_container(self, container_id: str) -> Tuple[asyncio.Event, Callable[[bytes], Awaitable[None]], AsyncIterator[bytes]]:
+    async def attach_container(self, container_id: str) -> Tuple[Callable[[], Awaitable[None]], Callable[[bytes], Awaitable[None]], AsyncIterator[bytes]]:
         """
         Attach to a running container's stdin/stdout/stderr.
         Returns a tuple containing:
-        - An asyncio.Event that can be set to detach from the container
+        - A coroutine that when called will detach from the container and clean up resources
         - A coroutine for sending data to stdin
         - An async iterator for receiving data from stdout/stderr
         """
@@ -825,23 +833,7 @@ class ContainerEngine:
                         break
             finally:
                 if not detach_event.is_set():
-                    print("Sending detach sequence")
-                    try:
-                        process.stdin.write(b'\x10\x11')
-                        await process.stdin.drain()
-                    except Exception as e:
-                        print(f"❌ Error sending detach sequence: {e}")
-                    detach_event.set()
-                    try:
-                        print("Terminating process")
-                        process.terminate()
-                        await asyncio.wait_for(process.wait(), timeout=1.0)
-                    except (asyncio.TimeoutError, ProcessLookupError):
-                        print("Process already gone or didn't terminate, killing...")
-                        try:
-                            process.kill()
-                        except ProcessLookupError:
-                            pass
+                    await cancel()
 
         async def receive_data() -> AsyncIterator[bytes]:
             """Receive data from the queue."""
@@ -870,7 +862,36 @@ class ContainerEngine:
         # Start the read_output task
         read_task = asyncio.create_task(read_output())
 
-        return detach_event, send_data, receive_data  # Return the function, not the coroutine
+        async def cancel():
+            """Cancel the attachment and clean up resources."""
+            if True or not detach_event.is_set():
+                detach_event.set()
+                try:
+                    # Send detach sequence
+                    process.stdin.write(b'\x10\x11')
+                    await process.stdin.drain()
+                except Exception as e:
+                    print(f"❌ Error sending detach sequence: {e}")
+                
+                # Terminate the process
+                try:
+                    process.terminate()
+                    await asyncio.wait_for(process.wait(), timeout=1.0)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                
+                # Cancel the read task
+                read_task.cancel()
+                try:
+                    await read_task
+                except asyncio.CancelledError:
+                    pass
+
+
+        return cancel, send_data, receive_data
 
     async def stat(self, container_id: str, path: str) -> dict:
         """
@@ -1100,3 +1121,19 @@ class ContainerEngine:
         except Exception as e:
             logger.error(f"Error creating directory {path}: {str(e)}")
             raise RuntimeError(f"Error creating directory: {str(e)}")
+
+    async def pause_sandbox(self, container_id: str) -> None:
+        try:
+            await self._run_podman_command(['pause', container_id])
+            logger.info(f"Paused container {container_id}")
+        except Exception as e:
+            logger.error(f"Error pausing container {container_id}: {str(e)}")
+            raise RuntimeError(f"Error pausing container: {str(e)}")
+
+    async def unpause_sandbox(self, container_id: str) -> None:
+        try:
+            await self._run_podman_command(['unpause', container_id])
+            logger.info(f"Unpaused container {container_id}")
+        except Exception as e:
+            logger.error(f"Error unpausing container {container_id}: {str(e)}")
+            raise RuntimeError(f"Error unpausing container: {str(e)}")
