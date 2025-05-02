@@ -69,6 +69,7 @@ class Container:
 
 class ContainerEngine:
     PODMAN_PATH = 'podman'
+    USE_UIDMAP = False
 
     def __init__(self, quota: QuotaManager, podman_path: str = PODMAN_PATH):
         self.quota = quota
@@ -409,7 +410,6 @@ class ContainerEngine:
         # First create the container
         create_args = [
             'create',
-            '--uidmap', f'0:{subuid}:{SubordinateManager.BLOCK_SIZE}', # gidmap defaults to uidmap
             '--cap-drop=ALL',
             '--security-opt', 'no-new-privileges',
             '--cpus', config.cpus,
@@ -419,6 +419,9 @@ class ContainerEngine:
             '--name', name,  # Container name
             '--label', f'quota_projname={quota_projname}',  # Store quota project name in labels
         ]
+
+        if ContainerEngine.USE_UIDMAP:
+            create_args.extend(['--uidmap', f'0:{subuid}:{SubordinateManager.BLOCK_SIZE}'])
 
         # Add storage-opt only if quota is supported
         if self.quota.is_supported():
@@ -733,11 +736,15 @@ class ContainerEngine:
             raise RuntimeError("Original container has no quota project name")
 
         # Get the mapped UID/GID for root (0) inside the container
-        uid_map = container_info["HostConfig"]["IDMappings"]["UidMap"][0]
-        gid_map = container_info["HostConfig"]["IDMappings"]["GidMap"][0]
-        # Parse the mapping (format: "container_id:host_id:size")
-        container_uid = int(uid_map.split(':')[1])
-        container_gid = int(gid_map.split(':')[1])
+        if ContainerEngine.USE_UIDMAP:
+            uid_map = container_info["HostConfig"]["IDMappings"]["UidMap"][0]
+            gid_map = container_info["HostConfig"]["IDMappings"]["GidMap"][0]
+            # Parse the mapping (format: "container_id:host_id:size")
+            container_uid = int(uid_map.split(':')[1])
+            container_gid = int(gid_map.split(':')[1])
+        else:
+            container_uid = 0
+            container_gid = 0
 
         logger.info(f"Forking container {container_id} with UID {container_uid} and GID {container_gid}")
 
@@ -1049,11 +1056,15 @@ class ContainerEngine:
             logger.info(f"Set file permissions to 644 for {path}")
             
             # Get the mapped UID/GID for root (0) inside the container
-            uid_map = container_info["HostConfig"]["IDMappings"]["UidMap"][0]
-            gid_map = container_info["HostConfig"]["IDMappings"]["GidMap"][0]
-            # Parse the mapping (format: "container_id:host_id:size")
-            container_uid = int(uid_map.split(':')[1])
-            container_gid = int(gid_map.split(':')[1])
+            if ContainerEngine.USE_UIDMAP:
+                uid_map = container_info["HostConfig"]["IDMappings"]["UidMap"][0]
+                gid_map = container_info["HostConfig"]["IDMappings"]["GidMap"][0]
+                # Parse the mapping (format: "container_id:host_id:size")
+                container_uid = int(uid_map.split(':')[1])
+                container_gid = int(gid_map.split(':')[1])
+            else:
+                container_uid = 0
+                container_gid = 0
             
             # Set ownership to the mapped root user inside the container
             os.chown(full_path, container_uid, container_gid)
@@ -1086,11 +1097,15 @@ class ContainerEngine:
         full_path = os.path.join(merged_dir, path.lstrip('/'))
         
         # Get the mapped UID/GID for root (0) inside the container
-        uid_map = container_info["HostConfig"]["IDMappings"]["UidMap"][0]
-        gid_map = container_info["HostConfig"]["IDMappings"]["GidMap"][0]
-        # Parse the mapping (format: "container_id:host_id:size")
-        container_uid = int(uid_map.split(':')[1])
-        container_gid = int(gid_map.split(':')[1])
+        if ContainerEngine.USE_UIDMAP:
+            uid_map = container_info["HostConfig"]["IDMappings"]["UidMap"][0]
+            gid_map = container_info["HostConfig"]["IDMappings"]["GidMap"][0]
+            # Parse the mapping (format: "container_id:host_id:size")
+            container_uid = int(uid_map.split(':')[1])
+            container_gid = int(gid_map.split(':')[1])
+        else:
+            container_uid = 0
+            container_gid = 0
         
         try:
             if parents:
