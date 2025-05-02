@@ -237,6 +237,42 @@
                 const data = JSON.parse(event.data);
                 console.log('Received event:', data);
                 
+                // Check if the current sandbox has terminated
+                if (selectedSandbox && data.container_id === selectedSandbox && data.type === 'container_stopped') {
+                    // Reset the view as if we had manually terminated it
+                    selectedSandbox = null;
+                    const sandboxInfo = document.getElementById("sandbox-info");
+                    sandboxInfo.innerText = "Select a sandbox to view status.";
+                    sandboxInfo.removeAttribute("data-url");
+                    document.getElementById("sandbox-actions").classList.add("hidden");
+                    
+                    // Clear all tab contents
+                    document.getElementById("exec-results").innerHTML = "<p class='text-gray-500'>Execution results will appear here.</p>";
+                    document.getElementById("sandbox-logs").innerHTML = "<p class='text-gray-500'>Sandbox logs will appear here.</p>";
+                    document.getElementById("exec-code").value = "";
+                    document.getElementById("exec-code").disabled = false;
+                    document.getElementById("exec-code").classList.remove("bg-gray-100", "cursor-not-allowed");
+                    
+                    // Reset terminal
+                    disconnectTerminal();
+                    if (term) {
+                        term.dispose();
+                        term = null;
+                    }
+                    
+                    // Reset HTTP view
+                    document.getElementById("sandbox-iframe").src = "";
+                    document.getElementById("url-bar").value = "";
+                    
+                    // Reset file explorer
+                    document.getElementById("file-explorer").classList.add("hidden");
+                    document.getElementById("file-list").innerHTML = "<p class='text-gray-500 p-2'>Select a sandbox to view files.</p>";
+                    document.getElementById("current-path").value = "";
+                    
+                    // Switch back to exec tab
+                    switchTab('exec');
+                }
+                
                 // Refresh sandbox list when container events occur
                 setTimeout(loadSandboxes, 500);
             };
@@ -533,6 +569,13 @@
                 // Show file explorer and load root directory
                 document.getElementById("file-explorer").classList.remove("hidden");
                 loadFileSystem('/');
+
+                // Automatically switch to appropriate tab based on sandbox type
+                if (sb.interactive) {
+                    switchTab('terminal');
+                } else {
+                    switchTab('logs');
+                }
             } catch (error) {
                 showError(error.message);
             }
@@ -696,8 +739,11 @@
                 });
 
                 if (!response.ok) throw new Error(await response.text());
+                const newSandbox = await response.json();
                 closeCreateModal();
                 loadSandboxes();
+                // Select the newly created sandbox
+                selectSandbox(newSandbox.id);
             } catch (error) {
                 showError(error.message);
                 closeCreateModal();
@@ -799,15 +845,32 @@
                 sandboxInfo.innerText = "Select a sandbox to view status.";
                 sandboxInfo.removeAttribute("data-url");
                 document.getElementById("sandbox-actions").classList.add("hidden");
-                document.getElementById("exec-results").innerHTML = "";
+                
+                // Clear all tab contents
+                document.getElementById("exec-results").innerHTML = "<p class='text-gray-500'>Execution results will appear here.</p>";
                 document.getElementById("sandbox-logs").innerHTML = "<p class='text-gray-500'>Sandbox logs will appear here.</p>";
+                document.getElementById("exec-code").value = "";
+                document.getElementById("exec-code").disabled = false;
+                document.getElementById("exec-code").classList.remove("bg-gray-100", "cursor-not-allowed");
                 
-                // Stop any active log streaming
-                stopLogsFetching();
+                // Reset terminal
+                disconnectTerminal();
+                if (term) {
+                    term.dispose();
+                    term = null;
+                }
                 
-                // Reset HTTP view if active
+                // Reset HTTP view
                 document.getElementById("sandbox-iframe").src = "";
                 document.getElementById("url-bar").value = "";
+                
+                // Reset file explorer
+                document.getElementById("file-explorer").classList.add("hidden");
+                document.getElementById("file-list").innerHTML = "<p class='text-gray-500 p-2'>Select a sandbox to view files.</p>";
+                document.getElementById("current-path").value = "";
+                
+                // Switch back to exec tab
+                switchTab('exec');
                 
                 // Refresh sandbox list
                 loadSandboxes();
@@ -842,7 +905,16 @@
         }
 
         function showError(message) {
-            document.getElementById("error-message").innerText = message;
+            let errorMessage = message;
+            try {
+                const jsonError = JSON.parse(message);
+                if (jsonError.detail) {
+                    errorMessage = `<pre class="font-mono text-sm whitespace-pre-wrap">${jsonError.detail}</pre>`;
+                }
+            } catch (e) {
+                // Not JSON, use message as is
+            }
+            document.getElementById("error-message").innerHTML = errorMessage;
             document.getElementById("error-alert").classList.remove("hidden");
         }
 

@@ -68,7 +68,9 @@ class Container:
         await self.engine.unpause_sandbox(self.id)
 
 class ContainerEngine:
-    def __init__(self, quota: QuotaManager, podman_path: str = 'podman'):
+    PODMAN_PATH = 'podman'
+
+    def __init__(self, quota: QuotaManager, podman_path: str = PODMAN_PATH):
         self.quota = quota
         self.podman_path = podman_path.split()
         self.inspect_cache = {}
@@ -197,7 +199,7 @@ class ContainerEngine:
 
     async def _run_podman_command(self, args: List[str]) -> str:
         """Run a Podman CLI command asynchronously and return its output."""
-        command = self.podman_path + args
+        command = self.podman_path + ['--log-level=debug'] + args
         print(f'Executing: {" ".join(command)}')
 
         def run_in_thread():
@@ -407,7 +409,6 @@ class ContainerEngine:
         # First create the container
         create_args = [
             'create',
-            '--storage-opt', f'size={config.storage_size}',
             '--uidmap', f'0:{subuid}:{SubordinateManager.BLOCK_SIZE}', # gidmap defaults to uidmap
             '--cap-drop=ALL',
             '--security-opt', 'no-new-privileges',
@@ -418,6 +419,10 @@ class ContainerEngine:
             '--name', name,  # Container name
             '--label', f'quota_projname={quota_projname}',  # Store quota project name in labels
         ]
+
+        # Add storage-opt only if quota is supported
+        if self.quota.is_supported():
+            create_args.extend(['--storage-opt', f'size={config.storage_size}'])
 
         # Add capabilities from config
         for cap in config.capabilities:
@@ -445,20 +450,9 @@ class ContainerEngine:
         
         container_id = await self._run_podman_command(create_args)
 
-        # Set quota before starting
-        if self.quota.is_supported():
-            # Get the container's UpperDir (writable layer)
-            container_info = await self._get_container_info(container_id)
-            upper_dir = container_info["GraphDriver"]["Data"]["UpperDir"]
-            await self.quota.apply(upper_dir, quota_projname)
-
         # Start the container
         await self._run_podman_command(['start', container_id])
 
-        # Apply quota project settings after container startup
-        if self.quota.is_supported():
-            await self.quota.apply2(quota_projname)
-        
         container_ip, exposed_port = await self._get_container_ip(container_id)
 
         return Container(
@@ -531,14 +525,6 @@ class ContainerEngine:
             return None  # If the container doesn't exist
 
     async def stop_container(self, container_id: str) -> None:
-        # Clear quota before stopping
-        if self.quota.is_supported():
-            container_info = await self._get_container_info(container_id)
-            upper_dir = container_info["GraphDriver"]["Data"]["UpperDir"]
-            quota_projname = container_info["Config"]["Labels"].get("quota_projname")
-            if quota_projname:
-                await self.quota.clear_path(upper_dir)
-
         # Stop the container
         #await self._run_podman_command(['stop', '--time', '3', container_id])
         await self._run_podman_command(['kill', '-s', 'KILL', container_id])
@@ -583,10 +569,6 @@ class ContainerEngine:
         container_info = await self._get_container_info(container_id)
         upper_dir = container_info["GraphDriver"]["Data"]["UpperDir"]
 
-        # Set quota after restoring
-        if self.quota.is_supported():
-            await self.quota.apply(upper_dir, quota_projname)
-
         container_ip = await self._get_container_ip(container_id)
 
         return Container(
@@ -616,8 +598,8 @@ class ContainerEngine:
             await self._run_podman_command(['volume', 'create', '--label', f'sbx_id={container_id}', new_volume])
 
             # Copy the data using export/import
-            export_cmd = ["podman", "volume", "export", old_volume]
-            import_cmd = ["podman", "volume", "import", new_volume, "-"]
+            export_cmd = [self.podman_path, "volume", "export", old_volume]
+            import_cmd = [self.podman_path, "volume", "import", new_volume, "-"]
 
             with subprocess.Popen(export_cmd, stdout=subprocess.PIPE) as export_proc, \
                  subprocess.Popen(import_cmd, stdin=export_proc.stdout) as import_proc:

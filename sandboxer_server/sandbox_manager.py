@@ -831,7 +831,7 @@ async def proxy_request(sandbox_id_or_name: str, path: str, request: Request):
     container = await engine.get_container(sandbox['id'])
     if not container or not container.ip_address or not container.exposed_port:
         print(f'container ip: {container.ip_address} port: {container.exposed_port}')
-        raise HTTPException(status_code=500, detail="Sandbox container is missing network info")
+        raise HTTPException(status_code=500, detail="Sandbox container is missing an exposed port")
 
     sandbox_url = f"http://{container.ip_address}:{container.exposed_port}/{path}"
     #print(f'PROXY URL: {sandbox_url}')
@@ -891,7 +891,7 @@ async def proxy_request(sandbox_id_or_name: str, path: str, request: Request):
     except httpx.RemoteProtocolError as e:
         print(f"Downstream connection error: {e}")
         return JSONResponse(
-            {"error": "Sandbox connection was unexpectedly closed"},
+            {"error": "Sandbox connection was unexpectedly closed, is it an HTTP server?"},
             status_code=502
         )
     except asyncio.CancelledError:
@@ -962,7 +962,7 @@ async def proxy_websocket(websocket: WebSocket, sandbox_id_or_name: str, path: s
 
     container = await engine.get_container(sandbox['id'])
     if not container or not container.ip_address or not container.exposed_port:
-        await websocket.close(code=4005, reason="Sandbox container is missing network info")
+        await websocket.close(code=4005, reason="Sandbox container is missing an exposed port")
         return
 
     # Get the requested WebSocket subprotocols from the client

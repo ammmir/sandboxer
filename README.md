@@ -26,18 +26,11 @@ apt-get install criu
 
 Install the latest versions of the rest:
 
-> ⚠️ **Warning:** This will overwrite existing files on your system.
+> ⚠️ **Warning:** This will overwrite OCI runtimes and configurations on your system:
 
 ```bash
 wget https://github.com/mgoltzsche/podman-static/releases/download/v5.4.2/podman-linux-amd64.tar.gz && \
 tar --strip-components=1 -C / -zxvf podman-linux-amd64.tar.gz
-```
-
-Create the subordinate UID and GID mappings:
-
-```bash
-echo "containers:2147483647:2147483648" >> /etc/subuid && \
-echo "containers:2147483647:2147483648" >> /etc/subgid
 ```
 
 ## Quick Start
@@ -141,3 +134,36 @@ Note that Caddy requires additional configuration for automatic HTTPS with wildc
 ## Client SDKs
 
 Python (sync and async) and JavaScript/TypeScript client libraries are available under the `sdk` directory. They haven't been submitted to the relevant package managers yet.
+
+## Tips
+
+### Quota Support
+
+To limit the amunt of disk space sandboxes can use, it's highly recommended to run the container backing store (`podman info -f '{{.Store.GraphRoot}}'`) on an XFS file system with project quota enabled. For testing and lightweight use, you can create a disk image and mount it using a loopback device.
+
+For example, here's how to create a 50 GB sparse image:
+
+```bash
+dd if=/dev/zero of=/var/xfs.img bs=1M seek=50k count=0 && \
+mkfs.xfs /var/xfs.img && \
+mount -o rw,relatime,attr2,inode64,logbufs=8,logbsize=32k,prjquota,nodiratime,noatime /var/xfs.img /mnt/xfs
+```
+
+Update `/etc/containers/storage.conf` to use that path:
+
+```ini
+[storage]
+  ...
+  graphroot = "/mnt/xfs"
+```
+
+Run `podman system reset` to reconfigure the container store.
+
+
+### Security
+
+Restrict syslog access:
+
+```bash
+sysctl -w kernel.dmesg_restrict=1
+```

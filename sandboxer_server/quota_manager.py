@@ -15,6 +15,8 @@ logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger("uvicorn.error")
 
 class QuotaManager:
+    PODMAN_PATH = 'podman'
+
     def __init__(self, projects_file: str = "/etc/projects", projid_file: str = "/etc/projid"):
         self.projects_file = Path(projects_file)
         self.projid_file = Path(projid_file)
@@ -22,20 +24,31 @@ class QuotaManager:
         self._lock = asyncio.Lock()
         self._quota_supported = False
 
-        logger.info("Checking XFS quota support")
-
         # Check quota support
         try:
-            # Check if filesystem is mounted with quota support
-            with open('/proc/mounts') as f:
-                for line in f:
-                    if 'xfs' in line and 'prjquota' in line: # FIXME: check actual podman graph dir
-                        self._quota_supported = True
-                        break
-        except (FileNotFoundError, PermissionError):
-            pass
-        finally:
-            logger.info(f'XFS quota support: {self._quota_supported}')
+            # Get podman graph root
+            graph_root = subprocess.check_output(
+                [QuotaManager.PODMAN_PATH, "info", "-f", "{{.Store.GraphRoot}}"],
+                text=True
+            ).strip()
+
+            # Check filesystem type and options
+            output = subprocess.check_output(
+                ["findmnt", "-no", "FSTYPE,OPTIONS", "-T", graph_root],
+                text=True
+            ).strip()
+
+            # Parse the result
+            fstype, options = output.split(maxsplit=1)
+
+            # Check conditions
+            if fstype == "xfs" and "prjquota" in options:
+                self._quota_supported = True
+                logger.info(f"XFS quota support detected: {graph_root}")
+            else:
+                logger.warning(f"XFS quota support NOT detected: {graph_root} {fstype} {options}")
+        except (FileNotFoundError, PermissionError, subprocess.SubprocessError) as e:
+            logger.warning(f"Failed to check quota support: {e}")
         
         # Ensure files exist
         self.projects_file.touch(exist_ok=True)
@@ -53,7 +66,6 @@ class QuotaManager:
                             continue
 
     def is_supported(self) -> bool:
-        return False
         return self._quota_supported
 
     async def _get_next_projid(self) -> int:

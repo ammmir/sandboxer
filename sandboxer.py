@@ -22,7 +22,7 @@ import sys
 import logging
 
 from sandboxer_server import sandbox_manager
-from sandboxer_server.sandbox_manager import app, get_db, quota
+from sandboxer_server.sandbox_manager import app, get_db
 
 # Default values from environment variables
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
@@ -30,8 +30,6 @@ GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 GITHUB_REDIRECT_URI = os.getenv("GITHUB_REDIRECT_URI")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-QUOTA_BLOCK_HARD = int(os.getenv("QUOTA_BLOCK_HARD", "1073741824")) # 1GB
-QUOTA_INODE_HARD = int(os.getenv("QUOTA_INODE_HARD", "1000000")) # 1M inodes
 
 # Global auth methods configuration
 AUTH_METHODS = {"token"}  # Default to token auth
@@ -138,14 +136,6 @@ async def create_network_bg(network_name: str):
         print(f"Network created: {network_name}")
     except Exception as e:
         print(f"Network/project creation failed (ignoring): {e}")
-
-    # Add project entry if quota is supported
-    if quota.is_supported():
-        print(f"Adding project entry for network: {network_name}")
-        await quota.add_project(network_name, block_hard=QUOTA_BLOCK_HARD, inode_hard=QUOTA_INODE_HARD)
-        print(f"Project entry created for network: {network_name}")
-    else:
-        print(f"Quota is not supported, skipping project entry creation for network: {network_name}")
 
 @app.get("/auth/github/callback", include_in_schema=False)
 async def auth_github_callback(code: str, request: Request):
