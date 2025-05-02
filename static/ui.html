@@ -462,7 +462,7 @@
                 
                 const sandboxInfo = document.getElementById("sandbox-info");
                 sandboxInfo.innerHTML = 
-                    `📦 ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}] | <span class="${statusColor}">Status: ${sb.status}</span> | IP: ${sb.ip_address || "N/A"}`;
+                    `📦 ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}] | <span class="${statusColor}">Status: ${sb.status}</span> | IP: ${sb.ip_address || "N/A"} | Hostname: ${sb.hostname || "N/A"}`;
                 
                 // Store the sandbox URL as a data attribute
                 sandboxInfo.setAttribute("data-url", sb.url || "");

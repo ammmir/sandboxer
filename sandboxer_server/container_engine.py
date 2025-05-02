@@ -39,6 +39,7 @@ class Container:
         self.id = kwargs.get("id", "unknown")
         self.ip_address = kwargs.get("ip_address", None)
         self.exposed_port = kwargs.get("exposed_port", None)
+        self.hostname = kwargs.get("hostname", None)
         self.name = kwargs.get("name", "unknown")
         self.status = kwargs.get("status", "unknown")
         self.image = kwargs.get("image", "unknown")
@@ -79,6 +80,9 @@ class ContainerEngine:
         self._cache_lock = asyncio.Lock()
         self._subscribers = set()
         self._shutdown_event = asyncio.Event()
+        info = subprocess.run([ContainerEngine.PODMAN_PATH, 'info', '-f', '{{.Store.GraphRoot}},{{.Store.RunRoot}}'], capture_output=True, text=True)
+        self.podman_graphroot, self.podman_runroot = info.stdout.strip().split(',')
+        logger.info(f"Podman GraphRoot: {self.podman_graphroot} RunRoot: {self.podman_runroot}")
 
     async def subscribe(self) -> asyncio.Queue:
         """Subscribe to container events. Returns a queue that will receive events."""
@@ -238,6 +242,7 @@ class ContainerEngine:
             containers.append(
                 Container(
                     id=data["Id"],
+                    hostname=data["Config"].get("Hostname", None),
                     ip_address=ip_address,
                     exposed_port=exposed_port,
                     engine=self,
@@ -392,7 +397,7 @@ class ContainerEngine:
         output = await self._run_podman_command(['network', 'inspect', name])
         return json.loads(output)[0]
 
-    async def start_container(self, image: str, name: str, subuid: int, quota_projname: str, config: 'ContainerConfig', env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False) -> Container:
+    async def start_container(self, image: str, name: str, subuid: int, quota_projname: str, config: 'ContainerConfig', env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False, hostname: str = None) -> Container:
         """
         Start a new container using `podman create` and `podman start`.
         Returns a `Container` object with its assigned IP address.
@@ -419,6 +424,9 @@ class ContainerEngine:
             '--name', name,  # Container name
             '--label', f'quota_projname={quota_projname}',  # Store quota project name in labels
         ]
+
+        if hostname:
+            create_args.extend(['--hostname', hostname])
 
         if ContainerEngine.USE_UIDMAP:
             create_args.extend(['--uidmap', f'0:{subuid}:{SubordinateManager.BLOCK_SIZE}'])
@@ -463,6 +471,7 @@ class ContainerEngine:
             id=container_id,
             ip_address=container_ip,
             exposed_port=exposed_port,
+            hostname=hostname,
             name=name,
             image=image
         )
@@ -509,11 +518,14 @@ class ContainerEngine:
             # Check if container is interactive by looking at the TTY flag
             interactive = data["Config"].get("Tty", False)
 
+            hostname = data["Config"].get("Hostname", None)
+
             return Container(
                 engine=self,
                 id=data["Id"],
                 ip_address=ip_address,
                 exposed_port=first_exposed_port,
+                hostname=hostname,
                 name=data.get("Name", "").lstrip("/"),
                 status=data["State"]["Status"].lower(),  # Get status from State.Status
                 image=data.get("Image", "unknown"),
@@ -578,6 +590,7 @@ class ContainerEngine:
             engine=self,
             id=container_id,
             ip_address=container_ip,
+            hostname=hostname,
             name=name
         )
 
@@ -613,9 +626,11 @@ class ContainerEngine:
 
         return new_volumes
 
-    def _edit_checkpoint(self, snapshot_file: str, volume_map: Dict[str, str], new_volumes: Dict[str, str], container_uid: int, container_gid: int) -> None:
+    async def _edit_checkpoint(self, snapshot_file: str, volume_map: Dict[str, str], new_volumes: Dict[str, str], container_uid: int, container_gid: int, hostname: str = None) -> None:
         """Modify the checkpoint tar file by creating a new one with updated volume references."""
         temp_output = f"{snapshot_file}.tmp"
+        if not hostname:
+            hostname = f"{str(ULID()).lower()}"
         
         try:
             with tarfile.open(snapshot_file, 'r:gz') as input_archive:
@@ -635,6 +650,30 @@ class ContainerEngine:
                                     f"/containers/storage/volumes/{old_volume}/_data",
                                     f"/containers/storage/volumes/{new_volume}/_data"
                                 )
+
+                            # Replace hostname in config.dump (JSON)
+                            try:
+                                config = json.loads(content)
+
+                                if "spec" in config and "process" in config["spec"]:
+                                    config["spec"]["hostname"] = hostname
+                                    # replace the HOSTNAME env var in process.env
+                                    for i, env in enumerate(config["spec"]["process"]["env"]):
+                                        if "HOSTNAME" in env:
+                                            config["spec"]["process"]["env"][i] = f"HOSTNAME={hostname}"
+                                            break
+
+                                if "hostname" in config:
+                                    config["hostname"] = hostname
+
+                                # also need to update newNetworks.<the network name>.aliases array
+                                for network in config.get("newNetworks", {}).values():
+                                    if "aliases" in network:
+                                        network["aliases"] = [hostname]
+
+                                content = json.dumps(config, indent=2)
+                            except Exception as e:
+                                logger.error(f"Error replacing hostname in config.dump: {e}")
                             
                             # Create a new tarinfo with the same metadata but updated size
                             new_content = content.encode('utf-8')
@@ -644,7 +683,56 @@ class ContainerEngine:
                             new_info.uid = container_uid
                             new_info.gid = container_gid
                             new_info.mtime = member.mtime
-                            logger.info(f"Adding file {member.name} with UID {container_uid} and GID {container_gid}")
+                            logger.info(f"Adding modified file {member.name} with UID {container_uid} and GID {container_gid}")
+
+                            # Add modified content to archive
+                            output_archive.addfile(new_info, fileobj=io.BytesIO(new_content))
+                        elif member.name == "checkpoint/utsns-12.img":
+                            content = file.read()
+                            
+                            # Create a subprocess to decode the UTS namespace
+                            decode_process = await asyncio.create_subprocess_exec(
+                                'crit', 'decode',
+                                stdin=asyncio.subprocess.PIPE,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE
+                            )
+                            
+                            # Send the content to crit decode
+                            stdout, stderr = await decode_process.communicate(input=content)
+                            if decode_process.returncode != 0:
+                                raise RuntimeError(f"crit decode failed: {stderr.decode()}")
+                            
+                            # Parse the JSON output
+                            uts_data = json.loads(stdout)
+                            
+                            # Update the nodename with the new hostname
+                            uts_data["entries"][0]["nodename"] = hostname
+                            
+                            # Create a subprocess to encode the updated UTS namespace
+                            encode_process = await asyncio.create_subprocess_exec(
+                                'crit', 'encode',
+                                stdin=asyncio.subprocess.PIPE,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE
+                            )
+
+                            logger.info(f'Updating UTS namespace: {json.dumps(uts_data)}')
+                            
+                            # Send the updated JSON to crit encode
+                            stdout, stderr = await encode_process.communicate(input=json.dumps(uts_data).encode())
+                            if encode_process.returncode != 0:
+                                raise RuntimeError(f"crit encode failed: {stderr.decode()}")
+                            
+                            # Create a new TarInfo object with the updated content
+                            new_content = stdout
+                            new_info = tarfile.TarInfo(member.name)
+                            new_info.size = len(new_content)
+                            new_info.mode = member.mode
+                            new_info.uid = container_uid
+                            new_info.gid = container_gid
+                            new_info.mtime = member.mtime
+                            logger.info(f"Adding modified file {member.name} with UID {container_uid} and GID {container_gid}")
 
                             # Add modified content to archive
                             output_archive.addfile(new_info, fileobj=io.BytesIO(new_content))
@@ -666,17 +754,17 @@ class ContainerEngine:
         
         return snapshot_file
 
-    async def _copy_and_modify_container_files(self, parent_id: str, new_id: str, container_uid: int, container_gid: int) -> None:
+    async def _copy_and_modify_container_files(self, parent_id: str, new_id: str, container_uid: int, container_gid: int, hostname: str = None) -> None:
         """
         Copy and modify container-specific files from parent to new container.
         This includes /etc/hosts, /etc/resolv.conf, and /etc/hostname.
         """
+
         # Get the userdata paths for both containers
-        parent_path = f"/var/run/containers/storage/overlay-containers/{parent_id}/userdata"
-        new_path = f"/var/run/containers/storage/overlay-containers/{new_id}/userdata"
+        parent_path = f"{self.podman_runroot}/overlay-containers/{parent_id}/userdata"
+        new_path = f"{self.podman_runroot}/overlay-containers/{new_id}/userdata"
 
         # Get the new container's hostname and IPs
-        new_hostname = await self._run_podman_command(['inspect', new_id, '--format', '{{.Config.Hostname}}'])
         new_ip, _ = await self._get_container_ip(new_id)
         parent_ip, _ = await self._get_container_ip(parent_id)
 
@@ -708,12 +796,22 @@ class ContainerEngine:
 
         # Copy and modify hostname file
         with open(f"{new_path}/hostname", 'w') as f:
-            f.write(new_hostname)
+            logger.info(f"Writing new hostname to {new_path}/hostname: {hostname}")
+            f.write(hostname)
 
         # Set UID/GID for hostname file
         os.chown(f"{new_path}/hostname", container_uid, container_gid)
 
-    async def fork_container(self, container_id: str, new_name: str, keep_snapshot: bool = False) -> Tuple[Container, str]:
+        # Modify graphroot/overlay-containers/<new id>/config.json with the new hostname
+        with open(f"{self.podman_graphroot}/overlay-containers/{new_id}/userdata/config.json", 'r') as f:
+            config = json.load(f)
+
+        config["hostname"] = hostname
+
+        with open(f"{self.podman_graphroot}/overlay-containers/{new_id}/userdata/config.json", 'w') as f:
+            json.dump(config, f)
+
+    async def fork_container(self, container_id: str, new_name: str, keep_snapshot: bool = False, hostname: str = None) -> Tuple[Container, str]:
         """
         Forks a running container by:
         1. Creating a snapshot
@@ -734,6 +832,9 @@ class ContainerEngine:
         quota_projname = container_info["Config"]["Labels"].get("quota_projname")
         if not quota_projname:
             raise RuntimeError("Original container has no quota project name")
+
+        if not hostname:
+            hostname = f"{container_info['Config']['Hostname']}-{str(ULID()).lower()[:8]}"
 
         # Get the mapped UID/GID for root (0) inside the container
         if ContainerEngine.USE_UIDMAP:
@@ -760,7 +861,7 @@ class ContainerEngine:
         new_volumes = await self._duplicate_volumes(container_id, volume_map)
 
         # Step 4: Modify the snapshot metadata
-        modified_snapshot = self._edit_checkpoint(snapshot_file, volume_map, new_volumes, container_uid, container_gid)
+        modified_snapshot = await self._edit_checkpoint(snapshot_file, volume_map, new_volumes, container_uid, container_gid, hostname)
 
         # Step 5: Restore the modified checkpoint with the same quota project name
         restored_id = await self._run_podman_command([
@@ -773,7 +874,7 @@ class ContainerEngine:
         container_ip = await self._get_container_ip(restored_id)
 
         # Step 6: Copy and modify container-specific files
-        await self._copy_and_modify_container_files(container_id, restored_id, container_uid, container_gid)
+        await self._copy_and_modify_container_files(container_id, restored_id, container_uid, container_gid, hostname)
 
         # Delete snapshot if requested
         if not keep_snapshot:
@@ -782,7 +883,7 @@ class ContainerEngine:
             except OSError as e:
                 print(f"Failed to delete snapshot {modified_snapshot}: {e}")
 
-        return Container(id=restored_id, name=new_name, ip_address=container_ip, engine=self), modified_snapshot
+        return Container(id=restored_id, name=new_name, ip_address=container_ip, engine=self, hostname=hostname), modified_snapshot
 
     async def attach_container(self, container_id: str) -> Tuple[Callable[[], Awaitable[None]], Callable[[bytes], Awaitable[None]], AsyncIterator[bytes]]:
         """

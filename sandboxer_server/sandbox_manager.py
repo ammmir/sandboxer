@@ -10,6 +10,7 @@ import httpx
 from ulid import ULID
 import json
 import os
+import re
 import websockets
 import sqlite3
 from datetime import datetime
@@ -239,6 +240,7 @@ class CreateSandboxRequest(BaseModel):
 
 class ForkSandboxRequest(BaseModel):
     label: str
+    hostname: str | None = None
 
 class ExecuteRequest(BaseModel):
     code: str
@@ -263,6 +265,7 @@ async def get_sandboxes(request: Request):
                     "name": container.name,
                     "status": "terminated" if row['deleted_at'] else container.status,
                     "ip_address": container.ip_address,
+                    "hostname": container.hostname,
                     "label": row['label'],
                     "parent_id": row['parent_id'],
                     "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (row['id'],)).fetchall(),
@@ -277,6 +280,7 @@ async def get_sandboxes(request: Request):
                     "name": row['name'],
                     "status": "terminated",
                     "ip_address": None,
+                    "hostname": None,
                     "label": row['label'],
                     "parent_id": row['parent_id'],
                     "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (row['id'],)).fetchall(),
@@ -315,7 +319,7 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
             )
             db.commit()
             
-        return {"id": container.id, "name": container.name, "label": label}
+        return {"id": container.id, "name": container.name, "label": label, "hostname": container.hostname}
     except Exception as e:
         print(f'Error starting sandbox:', e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -328,11 +332,19 @@ async def fork_sandbox(sandbox_id: str, request: ForkSandboxRequest, req: Reques
         if not parent:
             raise HTTPException(status_code=404, detail="Sandbox not found")
 
+        if not request.hostname:
+            container = await engine.get_container(sandbox_id)
+            hostname = container.hostname
+            clean_label = re.sub(r'[^a-zA-Z0-9\s-]', '-', request.label.strip())
+            clean_label = re.sub(r'[\s-]+', '-', clean_label)
+            hostname = f"{hostname}-{clean_label}".rstrip('-')
+
         child_label = request.label if request.label else f"Fork of {parent['label']}"
         try:
             forked_container, _ = await engine.fork_container(
                 sandbox_id, 
-                str(ULID()).lower()
+                str(ULID()).lower(),
+                hostname=hostname
             )
             
             db.execute(
@@ -437,6 +449,7 @@ async def get_sandbox(sandbox_id: str, req: Request):
                     "name": sandbox['name'],
                     "status": "terminated",
                     "ip_address": None,
+                    "hostname": None,
                     "label": sandbox['label'],
                     "parent_id": sandbox['parent_id'],
                     "child_ids": db.execute("SELECT id FROM sandboxes WHERE parent_id = ?", (sandbox['id'],)).fetchall(),
@@ -453,6 +466,7 @@ async def get_sandbox(sandbox_id: str, req: Request):
                 "name": container.name,
                 "status": container.status,
                 "ip_address": container.ip_address,
+                "hostname": container.hostname,
                 "label": sandbox['label'],
                 "parent_id": sandbox['parent_id'],
                 "child_ids": child_ids,
