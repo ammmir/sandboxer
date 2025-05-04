@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, PlainTextResponse, FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer
 from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
@@ -114,6 +115,7 @@ class AuthMiddleware:
         return await self.app(scope, receive, send)
 
 hx = httpx.AsyncClient()
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/auth/github", include_in_schema=False)
 async def auth_github():

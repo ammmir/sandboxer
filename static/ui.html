@@ -1,10 +1,12 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sandbox Manager</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5/themes.css" rel="stylesheet" type="text/css" />
     <!-- Add xterm.js dependencies -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.js" integrity="sha512-Gujw5GajF5is3nMoGv9X+tCMqePLL/60qvAv1LofUZTV9jK8ENbM9L+maGmOsNzuZaiuyc/fpph1KT9uR5w3CQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.min.css" integrity="sha512-XpXUuzg5afNt1bsgnrOesXP70TLH8tXYYK5sK+Y0UV+YBvJn9EfRFYWy4HT3TVDfH0nl1CO0lwOxIrt2gk9qjg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
@@ -16,54 +18,76 @@
         }
     </style>
 </head>
-<body class="h-screen flex bg-gray-100">
+<body class="h-screen flex bg-base-100">
+    <!-- Theme Toggle not used yet-->
+    <!--
+    <button class="theme-toggle btn btn-ghost btn-sm btn-circle fixed top-1 right-1" onclick="toggleTheme()" title="Toggle theme">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+        </svg>
+    </button>
+    -->
 
     <!-- Sidebar -->
-    <div class="w-1/4 bg-white shadow-md p-4 flex flex-col">
-        <h2 class="text-lg font-semibold mb-2">Sandboxes</h2>
-        <button class="bg-blue-500 text-white px-4 py-2 rounded mb-2 w-full"
-                onclick="openCreateModal()">
-            ➕ Create Sandbox
-        </button>
-        <label class="flex items-center text-sm text-gray-600 mb-4">
-            <input type="checkbox" id="show-dead" class="mr-2" onchange="toggleDeadSandboxes()">
-            Show terminated sandboxes
-        </label>
-        <ul id="sandbox-tree" class="space-y-2 flex-grow overflow-auto"></ul>
-        
-        <!-- File System Explorer -->
-        <div id="file-explorer" class="border-t pt-4 mt-4 hidden" 
-             ondragover="handleDragOver(event)" 
-             ondragleave="handleDragLeave(event)" 
-             ondrop="handleDrop(event)">
-            <h2 class="text-lg font-semibold mb-2">File System</h2>
-            <div class="flex items-center gap-2 mb-2">
-                <button onclick="navigateUp()" class="text-gray-600 hover:text-gray-800" title="Go up">
-                    ⬆
-                </button>
-                <button onclick="document.getElementById('file-upload').click()" class="text-gray-600 hover:text-gray-800" title="Upload files">
-                    📤
-                </button>
-                <button onclick="loadFileSystem(document.getElementById('current-path').value)" class="text-gray-600 hover:text-gray-800" title="Refresh directory">
-                    ↻
-                </button>
-                <input type="file" id="file-upload" class="hidden" webkitdirectory multiple>
-                <input type="text" id="current-path" class="border p-1 text-sm flex-grow" 
-                       onkeydown="handlePathInput(event)" placeholder="Enter path... (⌘P to focus)">
-            </div>
-            <div id="file-list" class="overflow-auto h-64 border rounded">
-                <p class="text-gray-500 p-2">Select a sandbox to view files.</p>
-            </div>
+    <div class="w-1/4 bg-base-200 shadow-md p-4 flex flex-col h-screen">
+        <div class="sticky top-0">
+            <h2 class="text-lg font-semibold mb-2">Sandboxes</h2>
+            <button class="btn mb-2 w-full flex items-center justify-center gap-2 hover:bg-primary-focus transition-colors duration-200"
+                    onclick="openCreateModal()">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                </svg>
+                Create Sandbox
+            </button>
+            <label class="label cursor-pointer">
+                <input type="checkbox" id="show-dead" class="checkbox checkbox-sm" onchange="toggleDeadSandboxes()">
+                <span class="label-text text-sm">Show terminated sandboxes</span>
+            </label>
+        </div>
+
+        <div class="flex-1 overflow-y-auto">
+            <ul id="sandbox-tree" class="space-y-2 flex-1 overflow-auto"></ul>
         </div>
         
-        <!-- Add user info section at bottom -->
-        <div id="user-info" class="border-t pt-4 mt-4">
-            <div class="flex items-center gap-3">
-                <img id="user-avatar" class="w-8 h-8 rounded-full" src="" alt="User avatar">
-                <span id="user-name" class="flex-grow text-sm font-medium"></span>
-                <button onclick="logout()" class="text-red-500 hover:text-red-700 text-sm">
-                    Logout
-                </button>
+        <div>
+            <!-- File System Explorer -->
+            <div id="file-explorer" class="border-t border-base-300 pt-4 mt-4 hidden flex flex-col w-full" 
+                ondragover="handleDragOver(event)" 
+                ondragleave="handleDragLeave(event)" 
+                ondrop="handleDrop(event)">
+                <div class="flex join items-center mb-2">
+                    <button onclick="navigateUp()" class="btn btn-sm join-item" title="Go up">
+                        ⬆
+                    </button>
+                    <button onclick="loadFileSystem(document.getElementById('current-path').value)" class="btn btn-sm join-item" title="Refresh directory">
+                        ↻
+                    </button>
+                    <input type="file" id="file-upload" class="hidden" webkitdirectory multiple>
+                    <input type="text" id="current-path" class="input input-bordered input-sm flex-grow" 
+                        onkeydown="handlePathInput(event)" placeholder="Enter path... (⌘P to focus)">
+                    <button onclick="document.getElementById('file-upload').click()" class="btn btn-sm join-item" title="Upload files">
+                        📤
+                    </button>
+                </div>
+                <div class="w-full h-64">
+                    <ul id="file-list" class="menu menu-xs rounded-box w-full h-full overflow-y-auto overflow-x-hidden grid grid-cols-2 gap-0 auto-rows-min"
+                        ondragover="handleDragOver(event)" 
+                        ondragleave="handleDragLeave(event)" 
+                        ondrop="handleDrop(event)">
+                        <p class="text-base-content/70 p-2">Select a sandbox to view files.</p>
+                    </ul>
+                </div>
+            </div>
+            
+            <!-- Add user info section at bottom -->
+            <div id="user-info" class="border-t border-base-300 pt-4 mt-4 bg-base-200">
+                <div class="flex items-center gap-3">
+                    <img id="user-avatar" class="w-8 h-8 rounded-full" src="" alt="User avatar">
+                    <span id="user-name" class="flex-grow text-sm font-medium"></span>
+                    <button onclick="logout()" class="btn btn-ghost btn-sm text-error">
+                        Logout
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -73,58 +97,84 @@
         <h2 class="text-lg font-semibold">Sandbox Console</h2>
 
         <!-- Sandbox Status Bar -->
-        <div id="sandbox-status" class="bg-gray-300 text-gray-800 p-2 rounded mt-2 text-sm flex justify-between items-center">
-            <span id="sandbox-info">Select a sandbox to view status.</span>
-            <div id="sandbox-actions" class="hidden space-x-2">
-                <button class="bg-gray-500 text-white px-3 py-1 rounded text-sm" onclick="renameSandbox()">✏ Rename</button>
-                <button id="public-toggle" class="bg-purple-500 text-white px-3 py-1 rounded text-sm" onclick="togglePublic()">🔒 Make Public</button>
-                <button id="pause-toggle" class="bg-yellow-500 text-white px-3 py-1 rounded text-sm" onclick="togglePause()">⏸ Pause</button>
-                <button class="bg-red-500 text-white px-3 py-1 rounded text-sm" onclick="deleteSandbox()">❌ Terminate</button>
-                <button class="bg-purple-500 text-white px-3 py-1 rounded text-sm" onclick="forkSandbox()">🔀 Fork</button>
-            </div>
+        <div id="sandbox-status" class="bg-base-200 p-2 rounded mt-2 text-sm flex justify-between items-center">
+            <div id="sandbox-info" class="flex-grow">Select a sandbox to view status.</div>
+            <ul id="sandbox-actions"class="join menu menu-horizontal bg-base-200 rounded-box">
+                <li>
+                    <button onclick="renameSandbox()" title="Rename">
+                        <img src="/static/images/icon-rename.svg" alt="Rename" class="w-5 h-5">
+                    </button>
+                </li>
+                <li>
+                    <button id="public-toggle" onclick="togglePublic()" title="Make Public">
+                        <img src="/static/images/icon-public.svg" alt="Public" class="w-5 h-5">
+                    </button>
+                </li>
+                <li>
+                    <button id="pause-toggle" onclick="togglePause()" title="Pause">
+                        <img src="/static/images/icon-pause.svg" alt="Pause" class="w-5 h-5">
+                    </button>
+                </li>
+                <li>
+                    <button onclick="deleteSandbox()" title="Terminate">
+                        <img src="/static/images/icon-delete.svg" alt="Delete" class="w-5 h-5">
+                    </button>
+                </li>
+                <li>
+                    <button onclick="forkSandbox()" title="Fork">
+                        <img src="/static/images/icon-fork.svg" alt="Fork" class="w-5 h-5">
+                    </button>
+                </li>
+            </ul>
         </div>
 
         <!-- Error Alert -->
-        <div id="error-alert" class="hidden bg-red-500 text-white p-3 rounded mt-2">
+        <div id="error-alert" class="hidden alert alert-error mt-2">
             <span id="error-message"></span>
             <button class="float-right font-bold" onclick="hideError()">✖</button>
         </div>
 
         <!-- Tabs -->
-        <div class="flex border-b mt-4">
-            <button id="exec-tab" 
-                    class="px-4 py-2 text-sm font-medium rounded-t-lg bg-white border-t border-l border-r"
+        <div role="tablist" class="tabs tabs-lift mt-4">
+            <a role="tab" id="exec-tab" 
+                    class="tab tab-active"
                     onclick="switchTab('exec')">
                 Command Execution
-            </button>
-            <button id="terminal-tab" 
-                    class="px-4 py-2 text-sm font-medium rounded-t-lg border-t border-l border-r ml-2 bg-gray-100"
+            </a>
+            <a role="tab" id="terminal-tab" 
+                    class="tab"
                     onclick="switchTab('terminal')">
                 Terminal
-            </button>
-            <button id="logs-tab" 
-                    class="px-4 py-2 text-sm font-medium rounded-t-lg border-t border-l border-r ml-2 bg-gray-100"
+            </a>
+            <a role="tab" id="logs-tab" 
+                    class="tab"
                     onclick="switchTab('logs')">
                 Logs
-            </button>
-            <button id="http-tab" 
-                    class="px-4 py-2 text-sm font-medium rounded-t-lg border-t border-l border-r ml-2 bg-gray-100"
+            </a>
+            <a role="tab" id="http-tab" 
+                    class="tab"
                     onclick="switchTab('http')">
                 HTTP
-            </button>
+            </a>
         </div>
 
         <!-- Command Execution View -->
         <div id="exec-view" class="flex-grow flex flex-col">
-            <div id="exec-results" class="flex-grow bg-gray-200 p-4 rounded mt-4 overflow-auto h-[60vh]">
-                <p class="text-gray-500">Execution results will appear here.</p>
+            <div id="exec-results" class="flex-grow bg-base-200 p-4 rounded mt-4 overflow-auto h-[60vh]">
+                <p class="text-base-content/70">Execution results will appear here.</p>
             </div>
 
             <!-- Command Input & Buttons -->
-            <div class="bg-white p-4 shadow-md flex items-center gap-2">
-                <textarea id="exec-code" class="border p-2 w-full h-12 resize-none" placeholder="Enter command..."
+            <div class="bg-base-100 p-4 shadow-md flex items-center gap-2">
+                <textarea id="exec-code" class="textarea textarea-bordered w-full h-12 resize-none" placeholder="Enter command..."
                           autocorrect="off" spellcheck="false" onkeydown="handleEnter(event)"></textarea>
-                <button class="bg-green-500 text-white px-4 rounded" onclick="executeCode()">▶ Run</button>
+                <button class="btn flex items-center justify-center gap-2 hover:bg-primary-focus transition-colors duration-200" onclick="executeCode()">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Run
+                </button>
             </div>
         </div>
 
@@ -135,83 +185,99 @@
 
         <!-- Logs View -->
         <div id="logs-view" class="hidden flex-grow flex flex-col">
-            <div id="sandbox-logs" class="flex-grow bg-gray-200 p-4 rounded mt-4 overflow-auto h-[calc(60vh+4rem)]">
-                <p class="text-gray-500">Sandbox logs will appear here.</p>
+            <div id="sandbox-logs" class="flex-grow bg-base-200 p-4 rounded mt-4 overflow-auto h-[calc(60vh+4rem)]">
+                <p class="text-base-content/70">Sandbox logs will appear here.</p>
             </div>
         </div>
 
         <!-- HTTP View -->
-        <div id="http-view" class="hidden flex-grow flex flex-col">
-            <div class="flex items-center gap-2 mt-4">
-                <button class="text-gray-600 px-2 py-1 rounded hover:bg-gray-100" onclick="goBack()" title="Back">
-                    ◀
-                </button>
-                <button class="text-gray-600 px-2 py-1 rounded hover:bg-gray-100" onclick="goForward()" title="Forward">
-                    ▶
-                </button>
-                <input type="text" id="url-bar" class="border p-2 flex-grow rounded" 
-                       placeholder="Enter URL..." 
-                       onkeydown="handleUrlEnter(event)">
-                <button class="text-gray-600 px-2 py-1 rounded hover:bg-gray-100" onclick="refreshIframe()" title="Refresh">
-                    ↻
-                </button>
-                <button class="bg-blue-500 text-white px-4 py-2 rounded" onclick="navigateIframe()">Go</button>
+        <div id="http-view" class="hidden flex-grow flex flex-col h-full">
+            <div class="mockup-browser border border-base-300 w-full h-full flex flex-col">
+                <div class="mockup-browser-toolbar">
+                    <input type="text" id="browser-url" class="input input-sm w-full" 
+                           placeholder="https://" 
+                           onkeydown="handleBrowserUrlEnter(event)"
+                           onblur="handleBrowserUrlBlur(event)">
+                </div>
+                <div class="flex-grow bg-base-100" id="sandbox-iframe-container">
+                    <iframe id="sandbox-iframe" class="w-full h-full border-0" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-storage-access-by-user-activation"></iframe>
+                </div>
             </div>
-            <iframe id="sandbox-iframe" class="w-full flex-grow mt-4 border rounded" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-storage-access-by-user-activation"></iframe>
         </div>
 
     </div>
 
     <!-- Create Sandbox Modal -->
-    <div id="create-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex justify-center items-center">
-        <div class="bg-white p-6 rounded shadow-md w-1/3">
-            <h2 class="text-lg font-semibold">Create Sandbox</h2>
+    <dialog id="create-modal" class="modal">
+        <div class="modal-box w-11/12 max-w-3xl">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-semibold">Create Sandbox</h2>
+                <div class="dropdown dropdown-end">
+                    <details>
+                        <summary class="btn btn-ghost btn-sm">Examples</summary>
+                        <ul class="dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-52">
+                            <li><a onclick="populateExample('redis'); this.closest('details').removeAttribute('open')">Redis</a></li>
+                            <li><a onclick="populateExample('nginx'); this.closest('details').removeAttribute('open')">Nginx</a></li>
+                            <li><a onclick="populateExample('firefox'); this.closest('details').removeAttribute('open')">Firefox</a></li>
+                            <li><a onclick="populateExample('bash'); this.closest('details').removeAttribute('open')">Bash</a></li>
+                        </ul>
+                    </details>
+                </div>
+            </div>
 
-            <label class="block mt-2">Examples:</label>
-            <select id="sandbox-examples" class="border p-2 w-full" onchange="populateExample()">
-                <option value="">Select an example...</option>
-                <option value="redis">Redis</option>
-                <option value="nginx">Nginx</option>
-                <option value="firefox">Firefox</option>
-                <option value="bash">Bash</option>
-            </select>
+            <div class="flex gap-4 mb-4">
+                <div class="form-control flex-1">
+                    <label class="label">
+                        <span class="label-text">Docker Image</span>
+                    </label>
+                    <input type="text" id="sandbox-image" class="input input-bordered w-full" placeholder="e.g., python:3">
+                </div>
+                <div class="form-control flex-1">
+                    <label class="label">
+                        <span class="label-text">Label</span>
+                    </label>
+                    <input type="text" id="sandbox-label" class="input input-bordered w-full" placeholder="Sandbox Label">
+                </div>
+            </div>
 
-            <label class="block mt-2">Docker Image:</label>
-            <input type="text" id="sandbox-image" class="border p-2 w-full" placeholder="e.g., python:3">
+            <div class="form-control mb-4">
+                <label class="label">
+                    <span class="label-text">Container Arguments</span>
+                </label>
+                <textarea id="sandbox-args" 
+                         class="textarea textarea-bordered w-full h-24 font-mono text-sm" 
+                         placeholder="Enter one argument per line, for example:&#10;redis-server&#10;--loglevel warning&#10;"></textarea>
+            </div>
 
-            <label class="block mt-2">Label:</label>
-            <input type="text" id="sandbox-label" class="border p-2 w-full" placeholder="Sandbox Label">
-
-            <label class="block mt-2">Container Arguments:</label>
-            <textarea id="sandbox-args" 
-                     class="border p-2 w-full h-24 font-mono text-sm" 
-                     placeholder="Enter one argument per line, for example:&#10;redis-server&#10;--loglevel warning&#10;"></textarea>
-
-            <label class="block mt-2">Environment Variables:</label>
-            <textarea id="sandbox-env" 
-                     class="border p-2 w-full h-24 font-mono text-sm" 
-                     placeholder="Enter one environment variable per line, for example:&#10;POSTGRES_USER=foo&#10;POSTGRES_PASSWORD=bar&#10;"></textarea>
+            <div class="form-control mb-4">
+                <label class="label">
+                    <span class="label-text">Environment Variables</span>
+                </label>
+                <textarea id="sandbox-env" 
+                         class="textarea textarea-bordered w-full h-24 font-mono text-sm" 
+                         placeholder="Enter one environment variable per line, for example:&#10;POSTGRES_USER=foo&#10;POSTGRES_PASSWORD=bar&#10;"></textarea>
+            </div>
 
             <div class="mt-4 flex justify-between items-center">
-                <label class="flex items-center text-sm text-gray-600">
-                    <input type="checkbox" id="sandbox-interactive" class="mr-2">
-                    Interactive (enable terminal)
+                <label class="label cursor-pointer">
+                    <span class="label-text">Interactive (enable terminal)</span>
+                    <input type="checkbox" id="sandbox-interactive" class="checkbox">
                 </label>
-                <div class="flex">
-                    <button class="bg-gray-500 text-white px-4 py-2 mr-2 rounded" onclick="closeCreateModal()" id="create-cancel-btn">Cancel</button>
-                    <button class="bg-blue-500 text-white px-4 py-2 rounded flex items-center gap-2" onclick="createSandbox()" id="create-submit-btn">
+                <div class="flex gap-2">
+                    <button class="btn" onclick="closeCreateModal()" id="create-cancel-btn">Cancel</button>
+                    <button class="btn btn-neutral flex items-center gap-2" onclick="createSandbox()" id="create-submit-btn">
                         <span>Create</span>
                         <div class="hidden" id="create-spinner">
-                            <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
+                            <span class="loading loading-spinner loading-sm"></span>
                         </div>
                     </button>
                 </div>
             </div>
         </div>
-    </div>
+        <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+        </form>
+    </dialog>
 
     <script>
         let selectedSandbox = null;
@@ -247,11 +313,11 @@
                     document.getElementById("sandbox-actions").classList.add("hidden");
                     
                     // Clear all tab contents
-                    document.getElementById("exec-results").innerHTML = "<p class='text-gray-500'>Execution results will appear here.</p>";
-                    document.getElementById("sandbox-logs").innerHTML = "<p class='text-gray-500'>Sandbox logs will appear here.</p>";
+                    document.getElementById("exec-results").innerHTML = "<p class='text-base-content/70'>Execution results will appear here.</p>";
+                    document.getElementById("sandbox-logs").innerHTML = "<p class='text-base-content/70'>Sandbox logs will appear here.</p>";
                     document.getElementById("exec-code").value = "";
                     document.getElementById("exec-code").disabled = false;
-                    document.getElementById("exec-code").classList.remove("bg-gray-100", "cursor-not-allowed");
+                    document.getElementById("exec-code").classList.remove("bg-base-200", "cursor-not-allowed");
                     
                     // Reset terminal
                     disconnectTerminal();
@@ -262,11 +328,11 @@
                     
                     // Reset HTTP view
                     document.getElementById("sandbox-iframe").src = "";
-                    document.getElementById("url-bar").value = "";
+                    document.getElementById("browser-url").value = "";
                     
                     // Reset file explorer
                     document.getElementById("file-explorer").classList.add("hidden");
-                    document.getElementById("file-list").innerHTML = "<p class='text-gray-500 p-2'>Select a sandbox to view files.</p>";
+                    document.getElementById("file-list").innerHTML = "<p class='text-base-content/70 p-2'>Select a sandbox to view files.</p>";
                     document.getElementById("current-path").value = "";
                     
                     // Switch back to exec tab
@@ -377,7 +443,9 @@
                 const response = await fetch("/sandboxes");
                 if (!response.ok) throw new Error("Failed to fetch sandboxes.");
                 const data = await response.json();
-                document.getElementById("sandbox-tree").innerHTML = renderTree(data.sandboxes);
+                const treeContainer = document.getElementById("sandbox-tree");
+                treeContainer.className = "menu bg-base-200 rounded-box w-full";
+                treeContainer.innerHTML = renderTree(data.sandboxes);
             } catch (error) {
                 showError(error.message);
             }
@@ -424,16 +492,35 @@
                         return;
                     }
                     
-                    const isTerminated = sb.status === "terminated";
-                    const statusColor = isTerminated ? "text-red-500" : "text-blue-500";
-                    const statusIcon = isTerminated ? "💀" : "📦";
+                    // Add status indicator
+                    const statusDiv = document.createElement("div");
+                    statusDiv.setAttribute("aria-label", "status");
+                    statusDiv.className = "status";
+                    
+                    if (sb.status === "terminated") {
+                        statusDiv.classList.add("status-error");
+                        statusDiv.setAttribute("aria-label", "error");
+                    } else if (sb.status === "paused") {
+                        statusDiv.classList.add("status-warning");
+                        statusDiv.setAttribute("aria-label", "warning");
+                    } else if (sb.status === "stopped") {
+                        statusDiv.classList.add("status-neutral");
+                    } else {
+                        statusDiv.classList.add("status-success");
+                    }
+                    
+                    const hasChildren = sandboxes.some(child => child.parent_id === sb.id);
+                    const childrenHtml = hasChildren ? renderTree(sandboxes, sb.id) : '';
                     
                     html += `
-                        <li class="pl-4">
-                            <button class="${statusColor} font-semibold" onclick="selectSandbox('${sb.id}')">
-                                ${statusIcon} ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}]
-                            </button>
-                            <ul>${renderTree(sandboxes, sb.id)}</ul>
+                        <li>
+                            <a onclick="selectSandbox('${sb.id}')" class="${selectedSandbox === sb.id ? 'menu-active' : ''}">
+                                <div class="flex items-center gap-2">
+                                    ${statusDiv.outerHTML}
+                                    <span>${sb.label || "Unnamed"}</span>
+                                </div>
+                            </a>
+                            ${childrenHtml ? `<ul>${childrenHtml}</ul>` : ''}
                         </li>
                     `;
                 }
@@ -452,17 +539,85 @@
             disconnectTerminal();
             
             selectedSandbox = sandboxId;
+            
+            // Update active state in the tree
+            const treeItems = document.querySelectorAll('#sandbox-tree a');
+            treeItems.forEach(item => {
+                item.classList.remove('menu-active');
+                if (item.getAttribute('onclick').includes(sandboxId)) {
+                    item.classList.add('menu-active');
+                }
+            });
+            
             try {
                 const response = await fetch(`/sandboxes/${sandboxId}`);
                 if (!response.ok) throw new Error("Failed to fetch sandbox details.");
                 const sb = await response.json();
 
                 const isTerminated = sb.status === "terminated";
-                const statusColor = isTerminated ? "text-red-500" : "text-gray-800";
-                
+
+
                 const sandboxInfo = document.getElementById("sandbox-info");
-                sandboxInfo.innerHTML = 
-                    `📦 ${sb.label || "Unnamed"} [${sb.id.slice(0, 6)}] | <span class="${statusColor}">Status: ${sb.status}</span> | IP: ${sb.ip_address || "N/A"} | Hostname: ${sb.hostname || "N/A"}`;
+                sandboxInfo.innerHTML = ''; // Clear existing content
+                
+                // Create first line container
+                const firstLine = document.createElement("div");
+                firstLine.className = "flex items-center gap-2";
+                
+                // Add status indicator
+                const statusDiv = document.createElement("div");
+                statusDiv.setAttribute("aria-label", "status");
+                statusDiv.className = "status";
+                
+                if (sb.status === "terminated") {
+                    statusDiv.classList.add("status-error");
+                    statusDiv.setAttribute("aria-label", "error");
+                } else if (sb.status === "paused") {
+                    statusDiv.classList.add("status-warning");
+                    statusDiv.setAttribute("aria-label", "warning");
+                } else if (sb.status === "stopped") {
+                    statusDiv.classList.add("status-neutral");
+                } else {
+                    statusDiv.classList.add("status-success");
+                }
+                
+                // Add sandbox name
+                const nameSpan = document.createElement("span");
+                nameSpan.textContent = `${sb.label || "Unnamed"}`;
+                
+                firstLine.appendChild(statusDiv);
+                firstLine.appendChild(nameSpan);
+                
+                // Create second line container
+                const secondLine = document.createElement("div");
+                secondLine.className = "text-sm text-base-content/70 flex items-center gap-2";
+                
+                // Add hostname
+                const hostnameSpan = document.createElement("span");
+                hostnameSpan.textContent = `Hostname: ${sb.hostname || "N/A"}`;
+                
+                // Add copy button
+                const copyButton = document.createElement("button");
+                copyButton.className = "btn btn-ghost btn-xs p-0";
+                copyButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" /></svg>';
+                copyButton.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    // Get all text content from the result div, excluding the command line
+                    const textToCopy = Array.from(resultDiv.childNodes)
+                        .filter(node => !node.textContent.startsWith('>'))
+                        .map(node => node.textContent)
+                        .join('\n')
+                        .trim();
+                    navigator.clipboard.writeText(textToCopy);
+                };
+                
+                secondLine.appendChild(hostnameSpan);
+                secondLine.appendChild(copyButton);
+                
+                // Add both lines to sandboxInfo
+                sandboxInfo.appendChild(firstLine);
+                sandboxInfo.appendChild(secondLine);
                 
                 // Store the sandbox URL as a data attribute
                 sandboxInfo.setAttribute("data-url", sb.url || "");
@@ -487,30 +642,31 @@
                 // Update public toggle button
                 const publicToggle = document.getElementById("public-toggle");
                 if (sb.is_public) {
-                    publicToggle.innerHTML = "🔓 Make Private";
-                    publicToggle.classList.remove("bg-purple-500");
-                    publicToggle.classList.add("bg-green-500");
+                    publicToggle.querySelector('img').src = '/static/images/icon-public.svg';
+                    publicToggle.classList.remove("btn-ghost");
+                    publicToggle.classList.add("btn-primary");
                 } else {
-                    publicToggle.innerHTML = "🔒 Make Public";
-                    publicToggle.classList.remove("bg-green-500");
-                    publicToggle.classList.add("bg-purple-500");
+                    publicToggle.querySelector('img').src = '/static/images/icon-private.svg';
+                    publicToggle.classList.remove("btn-primary");
+                    publicToggle.classList.add("btn-ghost");
                 }
 
                 // Update pause toggle button
                 const pauseToggle = document.getElementById("pause-toggle");
-                pauseToggle.textContent = sb.status === "paused" ? "▶ Unpause" : "⏸ Pause";
+                pauseToggle.querySelector('img').src = sb.status === "paused" ? 
+                    '/static/images/icon-play.svg' : '/static/images/icon-pause.svg';
 
                 // Disable command execution controls if terminated
                 const execCode = document.getElementById("exec-code");
                 const runButton = document.querySelector("button[onclick='executeCode()']");
                 if (isTerminated) {
                     execCode.disabled = true;
-                    execCode.classList.add("bg-gray-100", "cursor-not-allowed");
+                    execCode.classList.add("bg-base-200", "cursor-not-allowed");
                     runButton.disabled = true;
                     runButton.classList.add("opacity-50", "cursor-not-allowed");
                 } else {
                     execCode.disabled = false;
-                    execCode.classList.remove("bg-gray-100", "cursor-not-allowed");
+                    execCode.classList.remove("bg-base-200", "cursor-not-allowed");
                     runButton.disabled = false;
                     runButton.classList.remove("opacity-50", "cursor-not-allowed");
                 }
@@ -594,9 +750,13 @@
                 
                 // Display executions in chronological order (newest first)
                 for (const execution of data.executions) {
-                    // Create a new result div for this execution
+                    // Create a container div for this execution
+                    const containerDiv = document.createElement("div");
+                    containerDiv.className = "relative group";
+                    
+                    // Create the result div for this execution
                     const resultDiv = document.createElement("pre");
-                    resultDiv.classList = "bg-black text-green-400 text-wrap p-2 rounded shadow my-2 overflow-auto";
+                    resultDiv.classList = "bg-base-200 text-primary text-wrap p-2 rounded shadow my-2 overflow-auto";
                     
                     // Add command header
                     resultDiv.textContent = `> ${execution.command}`;
@@ -604,7 +764,7 @@
                     // Add logs for this execution
                     for (const log of execution.logs) {
                         const logLine = document.createElement("div");
-                        logLine.className = log.fd === 2 ? "text-red-500" : "text-green-500";
+                        logLine.className = log.fd === 2 ? "text-error" : "text-primary";
                         logLine.textContent = log.content;
                         resultDiv.appendChild(logLine);
                     }
@@ -612,12 +772,32 @@
                     // Add exit code if available
                     if (execution.exit_code != 0) {
                         const exitLine = document.createElement("div");
-                        //exitLine.className = "text-yellow-500";
                         exitLine.textContent = `🛑 Process exited with code ${execution.exit_code}`;
                         resultDiv.appendChild(exitLine);
                     }
                     
-                    resultsContainer.appendChild(resultDiv);
+                    // Create copy button
+                    const copyButton = document.createElement("button");
+                    copyButton.className = "absolute top-2 right-2 btn btn-ghost btn-xs opacity-0 group-hover:opacity-100 transition-opacity duration-200";
+                    copyButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" /></svg>';
+                    copyButton.onclick = (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        // Get all text content from the result div, excluding the command line
+                        const textToCopy = Array.from(resultDiv.childNodes)
+                            .filter(node => !node.textContent.startsWith('>'))
+                            .map(node => node.textContent)
+                            .join('\n')
+                            .trim();
+                        navigator.clipboard.writeText(textToCopy);
+                    };
+                    
+                    // Add elements to container
+                    containerDiv.appendChild(resultDiv);
+                    containerDiv.appendChild(copyButton);
+                    
+                    // Add container to results
+                    resultsContainer.appendChild(containerDiv);
                 }
                 
                 // Scroll to bottom
@@ -627,7 +807,7 @@
             } catch (error) {
                 console.error("Error loading command executions:", error);
                 document.getElementById("exec-results").innerHTML = 
-                    `<div class="text-red-500">Error loading command executions: ${error.message}</div>`;
+                    `<div class="text-error">Error loading command executions: ${error.message}</div>`;
             }
         }
 
@@ -662,9 +842,8 @@
             }
         };
 
-        function populateExample() {
-            const selected = document.getElementById('sandbox-examples').value;
-            if (!selected) {
+        function populateExample(example) {
+            if (!example) {
                 // Clear all fields
                 document.getElementById('sandbox-image').value = '';
                 document.getElementById('sandbox-label').value = '';
@@ -674,14 +853,14 @@
                 return;
             }
 
-            const example = SANDBOX_EXAMPLES[selected];
-            document.getElementById('sandbox-image').value = example.image;
-            document.getElementById('sandbox-label').value = example.label;
-            document.getElementById('sandbox-args').value = example.args.join('\n');
-            document.getElementById('sandbox-env').value = Object.entries(example.env)
+            const exampleData = SANDBOX_EXAMPLES[example];
+            document.getElementById('sandbox-image').value = exampleData.image;
+            document.getElementById('sandbox-label').value = exampleData.label;
+            document.getElementById('sandbox-args').value = exampleData.args.join('\n');
+            document.getElementById('sandbox-env').value = Object.entries(exampleData.env)
                 .map(([key, value]) => `${key}=${value}`)
                 .join('\n');
-            document.getElementById('sandbox-interactive').checked = example.interactive;
+            document.getElementById('sandbox-interactive').checked = exampleData.interactive;
         }
 
         function setCreateLoading(isLoading) {
@@ -781,7 +960,7 @@
 
             // Create a new result div for this execution
             const resultDiv = document.createElement("pre");
-            resultDiv.classList = "bg-black text-green-400 text-wrap p-2 rounded shadow my-2 overflow-auto";
+            resultDiv.classList = "bg-base-200 text-primary text-wrap p-2 rounded shadow my-2 overflow-auto";
             // Escape the code before displaying
             resultDiv.textContent = `> ${code}`;
             document.getElementById("exec-results").append(resultDiv);
@@ -847,11 +1026,11 @@
                 document.getElementById("sandbox-actions").classList.add("hidden");
                 
                 // Clear all tab contents
-                document.getElementById("exec-results").innerHTML = "<p class='text-gray-500'>Execution results will appear here.</p>";
-                document.getElementById("sandbox-logs").innerHTML = "<p class='text-gray-500'>Sandbox logs will appear here.</p>";
+                document.getElementById("exec-results").innerHTML = "<p class='text-base-content/70'>Execution results will appear here.</p>";
+                document.getElementById("sandbox-logs").innerHTML = "<p class='text-base-content/70'>Sandbox logs will appear here.</p>";
                 document.getElementById("exec-code").value = "";
                 document.getElementById("exec-code").disabled = false;
-                document.getElementById("exec-code").classList.remove("bg-gray-100", "cursor-not-allowed");
+                document.getElementById("exec-code").classList.remove("bg-base-200", "cursor-not-allowed");
                 
                 // Reset terminal
                 disconnectTerminal();
@@ -862,11 +1041,11 @@
                 
                 // Reset HTTP view
                 document.getElementById("sandbox-iframe").src = "";
-                document.getElementById("url-bar").value = "";
+                document.getElementById("browser-url").value = "";
                 
                 // Reset file explorer
                 document.getElementById("file-explorer").classList.add("hidden");
-                document.getElementById("file-list").innerHTML = "<p class='text-gray-500 p-2'>Select a sandbox to view files.</p>";
+                document.getElementById("file-list").innerHTML = "<p class='text-base-content/70 p-2'>Select a sandbox to view files.</p>";
                 document.getElementById("current-path").value = "";
                 
                 // Switch back to exec tab
@@ -922,8 +1101,15 @@
             document.getElementById("error-alert").classList.add("hidden");
         }
 
-        function openCreateModal() { document.getElementById("create-modal").classList.remove("hidden"); }
-        function closeCreateModal() { document.getElementById("create-modal").classList.add("hidden"); }
+        function openCreateModal() { 
+            const modal = document.getElementById("create-modal");
+            modal.showModal();
+            // Use a small timeout to ensure the modal is fully rendered
+            setTimeout(() => {
+                document.getElementById("sandbox-image").focus();
+            }, 100);
+        }
+        function closeCreateModal() { document.getElementById("create-modal").close() }
 
         function switchTab(tab) {
             if (currentTab === tab) {
@@ -932,14 +1118,10 @@
             currentTab = tab; // Update current tab
 
             // Update tab styling
-            document.getElementById("exec-tab").classList.toggle("bg-white", tab === "exec");
-            document.getElementById("exec-tab").classList.toggle("bg-gray-100", tab !== "exec");
-            document.getElementById("terminal-tab").classList.toggle("bg-white", tab === "terminal");
-            document.getElementById("terminal-tab").classList.toggle("bg-gray-100", tab !== "terminal");
-            document.getElementById("logs-tab").classList.toggle("bg-white", tab === "logs");
-            document.getElementById("logs-tab").classList.toggle("bg-gray-100", tab !== "logs");
-            document.getElementById("http-tab").classList.toggle("bg-white", tab === "http");
-            document.getElementById("http-tab").classList.toggle("bg-gray-100", tab !== "http");
+            document.getElementById("exec-tab").classList.toggle("tab-active", tab === "exec");
+            document.getElementById("terminal-tab").classList.toggle("tab-active", tab === "terminal");
+            document.getElementById("logs-tab").classList.toggle("tab-active", tab === "logs");
+            document.getElementById("http-tab").classList.toggle("tab-active", tab === "http");
 
             // Show/hide content
             document.getElementById("exec-view").classList.toggle("hidden", tab !== "exec");
@@ -957,6 +1139,10 @@
                 }
                 if (selectedSandbox) {
                     connectTerminal();
+                }
+                // Focus the terminal
+                if (term) {
+                    term.focus();
                 }
             } else {
                 disconnectTerminal();
@@ -976,7 +1162,7 @@
         }
 
         function initializeHttpView() {
-            const urlBar = document.getElementById("url-bar");
+            const urlBar = document.getElementById("browser-url");
             const sandboxInfo = document.getElementById("sandbox-info");
             const sandboxUrl = sandboxInfo.getAttribute("data-url");
             
@@ -998,11 +1184,13 @@
             
             if (!sandboxUrl) {
                 document.getElementById("sandbox-iframe").src = "";
+                document.getElementById("browser-url").value = "https://";
                 return;
             }
             
-            const urlBar = document.getElementById("url-bar");
-            const userPath = urlBar.value;
+            // Use the browser URL value
+            const browserUrl = document.getElementById("browser-url");
+            const userPath = browserUrl.value;
             
             // If the user has modified the URL bar to a different domain, use that
             if (userPath.startsWith("http://") || userPath.startsWith("https://")) {
@@ -1012,6 +1200,7 @@
             
             // Otherwise, use the sandbox URL
             document.getElementById("sandbox-iframe").src = sandboxUrl;
+            browserUrl.value = sandboxUrl;
         }
 
         async function fetchLogs() {
@@ -1087,36 +1276,6 @@
             }
         }
 
-        function goBack() {
-            const iframe = document.getElementById("sandbox-iframe");
-            iframe.contentWindow.history.back();
-            // Update URL bar after navigation
-            setTimeout(() => {
-                const urlBar = document.getElementById("url-bar");
-                urlBar.value = iframe.contentWindow.location.href;
-            }, 100);
-        }
-
-        function goForward() {
-            const iframe = document.getElementById("sandbox-iframe");
-            iframe.contentWindow.history.forward();
-            // Update URL bar after navigation
-            setTimeout(() => {
-                const urlBar = document.getElementById("url-bar");
-                urlBar.value = iframe.contentWindow.location.href;
-            }, 100);
-        }
-
-        function refreshIframe() {
-            const iframe = document.getElementById("sandbox-iframe");
-            iframe.contentWindow.location.reload();
-            // Update URL bar after refresh
-            setTimeout(() => {
-                const urlBar = document.getElementById("url-bar");
-                urlBar.value = iframe.contentWindow.location.href;
-            }, 100);
-        }
-
         async function loadUserInfo() {
             try {
                 const response = await fetch('/auth/me');
@@ -1187,10 +1346,10 @@
                 // Update the button text and sandbox status
                 const pauseButton = document.getElementById("pause-toggle");
                 if (isPaused) {
-                    pauseButton.textContent = "⏸ Pause";
+                    pauseButton.querySelector('img').src = '/static/images/icon-play.svg';
                     sandboxInfo.setAttribute("data-status", "running");
                 } else {
-                    pauseButton.textContent = "▶ Unpause";
+                    pauseButton.querySelector('img').src = '/static/images/icon-pause.svg';
                     sandboxInfo.setAttribute("data-status", "paused");
                 }
                 
@@ -1249,27 +1408,33 @@
                 
                 // Create list items for each entry
                 entries.forEach(entry => {
-                    const item = document.createElement("div");
-                    item.className = "p-1 hover:bg-gray-100 cursor-pointer flex items-center gap-1";
+                    const li = document.createElement("li");
+                    li.className = "break-words w-full line-clamp-4";
+                    li.style.overflowWrap = "anywhere";
+                    const a = document.createElement("a");
+                    a.className = "flex items-center gap-2";
                     
-                    const icon = document.createElement("span");
-                    icon.textContent = entry.is_dir ? "📁" : "📄";
-                    icon.className = "text-sm";
+                    // Add icon
+                    const icon = document.createElement("img");
+                    icon.src = entry.is_dir ? "/static/images/icon-folder.svg" : "/static/images/icon-file.svg";
+                    icon.className = "h-4 w-4";
+                    icon.alt = entry.is_dir ? "Folder" : "File";
                     
+                    // Add name
                     const name = document.createElement("span");
                     name.textContent = entry.name;
-                    name.className = "text-xs";
                     
-                    item.appendChild(icon);
-                    item.appendChild(name);
+                    a.appendChild(icon);
+                    a.appendChild(name);
                     
                     if (entry.is_dir) {
-                        item.onclick = () => loadFileSystem(path + entry.name + '/');
+                        a.onclick = () => loadFileSystem(path + entry.name + '/');
                     } else {
-                        item.onclick = () => viewFile(path + entry.name);
+                        a.onclick = () => viewFile(path + entry.name);
                     }
                     
-                    fileList.appendChild(item);
+                    li.appendChild(a);
+                    fileList.appendChild(li);
                 });
                 
                 // Show file explorer if it was hidden
@@ -1277,7 +1442,7 @@
             } catch (error) {
                 console.error("Error loading file system:", error);
                 document.getElementById("file-list").innerHTML = 
-                    `<p class="text-red-500 p-2">Error: ${error.message}</p>`;
+                    `<li class="text-error p-2">Error: ${error.message}</li>`;
                 // Keep the entered path in the input even if it failed
                 document.getElementById("current-path").value = path;
             }
@@ -1310,20 +1475,23 @@
                 // Get the file content as a blob
                 const blob = await response.blob();
                 
-                // Create preview modal
-                const modal = document.createElement("div");
-                modal.className = "fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50";
-                modal.innerHTML = `
-                    <div class="bg-white p-6 rounded shadow-md w-3/4 max-h-[80vh] flex flex-col">
+                // Create preview dialog
+                const dialog = document.createElement("dialog");
+                dialog.id = "preview-dialog";
+                dialog.className = "modal";
+                dialog.innerHTML = `
+                    <div class="modal-box w-11/12 max-w-5xl max-h-[80vh] flex flex-col">
                         <div class="flex justify-between items-center mb-4">
                             <h3 class="text-lg font-semibold">${filename}</h3>
                             <div class="flex gap-2">
-                                <button onclick="downloadFile(this)" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
+                                <button onclick="downloadFile(this)" class="btn btn-neutral">
                                     Download <span class="text-xs opacity-75">(⌘S)</span>
                                 </button>
-                                <button onclick="closeModal(this)" class="text-gray-500 hover:text-gray-700">
-                                    ✖ <span class="text-xs opacity-75">(Esc)</span>
-                                </button>
+                                <form method="dialog">
+                                    <button class="btn btn-ghost">
+                                        ✖ <span class="text-xs opacity-75">(Esc)</span>
+                                    </button>
+                                </form>
                             </div>
                         </div>
                         <div class="flex-grow overflow-auto">
@@ -1332,31 +1500,32 @@
                             </div>
                         </div>
                     </div>
+                    <form method="dialog" class="modal-backdrop">
+                        <button>close</button>
+                    </form>
                 `;
                 
-                // Store the blob and filename in the modal for download
-                modal.dataset.blob = URL.createObjectURL(blob);
-                modal.dataset.filename = filename;
+                // Store the blob and filename in the dialog for download
+                dialog.dataset.blob = URL.createObjectURL(blob);
+                dialog.dataset.filename = filename;
                 
-                // Add modal to document
-                document.body.appendChild(modal);
+                // Add dialog to document
+                document.body.appendChild(dialog);
                 
                 // Add keyboard event listener
                 const handleKeyDown = (e) => {
-                    if (e.key === 'Escape') {
-                        closeModal(modal);
-                    } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
                         e.preventDefault(); // Prevent browser save dialog
-                        downloadFile(modal.querySelector('button[onclick="downloadFile(this)"]'));
+                        downloadFile(dialog.querySelector('button[onclick="downloadFile(this)"]'));
                     }
                 };
                 document.addEventListener('keydown', handleKeyDown);
                 
-                // Store the event listener reference in the modal's closure
-                modal.handleKeyDown = handleKeyDown;
+                // Store the event listener reference in the dialog's closure
+                dialog.handleKeyDown = handleKeyDown;
                 
                 // Handle preview based on content type
-                const previewContent = modal.querySelector('#preview-content');
+                const previewContent = dialog.querySelector('#preview-content');
                 
                 if (contentType.startsWith('image/')) {
                     // Image preview
@@ -1384,7 +1553,7 @@
                     const reader = new FileReader();
                     reader.onload = (e) => {
                         const pre = document.createElement('pre');
-                        pre.className = 'bg-gray-100 p-4 rounded overflow-auto font-mono text-sm';
+                        pre.className = 'bg-base-200 p-4 rounded overflow-auto font-mono text-sm';
                         pre.textContent = e.target.result;
                         previewContent.innerHTML = '';
                         previewContent.appendChild(pre);
@@ -1394,12 +1563,15 @@
                 } else {
                     // Unsupported type
                     previewContent.innerHTML = `
-                        <div class="text-center text-gray-500">
+                        <div class="text-center text-base-content/70">
                             <p>Preview not available for this file type.</p>
                             <p class="text-sm">${contentType}</p>
                         </div>
                     `;
                 }
+                
+                // Show the dialog
+                dialog.showModal();
                 
             } catch (error) {
                 console.error("Error viewing file:", error);
@@ -1407,24 +1579,10 @@
             }
         }
         
-        function closeModal(buttonOrModal) {
-            const modal = buttonOrModal.classList?.contains('fixed') ? buttonOrModal : buttonOrModal.closest('.fixed');
-            if (!modal) return;
-            
-            // Remove the keyboard event listener
-            if (modal.handleKeyDown) {
-                document.removeEventListener('keydown', modal.handleKeyDown);
-            }
-            // Clean up blob URL
-            URL.revokeObjectURL(modal.dataset.blob);
-            // Remove the modal
-            modal.remove();
-        }
-        
         function downloadFile(button) {
-            const modal = button.closest('.fixed');
-            const blobUrl = modal.dataset.blob;
-            const filename = modal.dataset.filename;
+            const dialog = document.getElementById('preview-dialog');
+            const blobUrl = dialog.dataset.blob;
+            const filename = dialog.dataset.filename;
             
             // Create temporary anchor for download
             const a = document.createElement('a');
@@ -1493,8 +1651,9 @@
             // Add event listener to iframe to update URL bar when URL changes
             const iframe = document.getElementById("sandbox-iframe");
             iframe.addEventListener('load', function() {
-                const urlBar = document.getElementById("url-bar");
-                urlBar.value = iframe.contentWindow.location.href;
+                const browserUrl = document.getElementById("browser-url");
+                const currentUrl = iframe.contentWindow.location.href;
+                browserUrl.value = currentUrl;
             });
         });
 
@@ -1515,29 +1674,40 @@
                     pathInput.select();
                 }
             }
+            // Add Ctrl-N/Cmd-N shortcut for Create Sandbox
+            if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+                e.preventDefault();
+                openCreateModal();
+            }
         });
 
         // Add these new functions after the handleFileUpload function
         function handleDragOver(event) {
             event.preventDefault();
             event.stopPropagation();
-            // Add visual feedback
-            event.currentTarget.classList.add('border-blue-500', 'bg-blue-50');
+            // Add visual feedback to the file list
+            const fileList = document.getElementById('file-list');
+            fileList.classList.remove('bg-base-100');
+            fileList.classList.add('bg-base-300');
         }
 
         function handleDragLeave(event) {
             event.preventDefault();
             event.stopPropagation();
-            // Remove visual feedback
-            event.currentTarget.classList.remove('border-blue-500', 'bg-blue-50');
+            // Remove visual feedback from the file list
+            const fileList = document.getElementById('file-list');
+            fileList.classList.remove('bg-base-300');
+            fileList.classList.add('bg-base-100');
         }
 
         async function handleDrop(event) {
             event.preventDefault();
             event.stopPropagation();
             
-            // Remove visual feedback
-            event.currentTarget.classList.remove('border-blue-500', 'bg-blue-50');
+            // Remove visual feedback from the file list
+            const fileList = document.getElementById('file-list');
+            fileList.classList.remove('bg-base-300');
+            fileList.classList.add('bg-base-100');
             
             if (!selectedSandbox) {
                 showError("Select a sandbox first.");
@@ -1598,6 +1768,70 @@
                     await processEntry(childEntry, formData, path + entry.name + '/');
                 }
             }
+        }
+
+        // Add theme toggle function at the beginning of the script
+        function toggleTheme() {
+            const html = document.documentElement;
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            html.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+        }
+
+        // Add theme initialization on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            // Initialize theme from localStorage or system preference
+            const savedTheme = localStorage.getItem('theme');
+            const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const initialTheme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
+            document.documentElement.setAttribute('data-theme', initialTheme);
+            
+            connectSSE();
+            loadSandboxes();
+            loadUserInfo();
+            
+            // Add event listener for file upload
+            document.getElementById('file-upload').addEventListener('change', handleFileUpload);
+            
+            // Add event listener to iframe to update URL bar when URL changes
+            const iframe = document.getElementById("sandbox-iframe");
+            iframe.addEventListener('load', function() {
+                const browserUrl = document.getElementById("browser-url");
+                const currentUrl = iframe.contentWindow.location.href;
+                browserUrl.value = currentUrl;
+            });
+        });
+
+        // Add these new functions after the handleUrlEnter function
+        function handleBrowserUrlEnter(event) {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                navigateFromBrowserUrl();
+            }
+        }
+
+        function handleBrowserUrlBlur(event) {
+            navigateFromBrowserUrl();
+        }
+
+        function navigateFromBrowserUrl() {
+            const browserUrl = document.getElementById("browser-url");
+            const url = browserUrl.value.trim();
+            
+            if (!url) return;
+            
+            // Add https:// if no protocol is specified
+            let fullUrl = url;
+            if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                fullUrl = "https://" + url;
+            }
+            
+            // Update both URL bars
+            document.getElementById("browser-url").value = fullUrl;
+            
+            // Navigate the iframe
+            document.getElementById("sandbox-iframe").src = fullUrl;
         }
     </script>
 </body>
