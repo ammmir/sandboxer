@@ -1548,7 +1548,18 @@
                     
                 } else if (contentType.startsWith('text/') || 
                           contentType === 'application/json' || 
-                          contentType === 'application/xml') {
+                          contentType === 'application/xml' ||
+                          filename.endsWith('.ts') ||
+                          filename.endsWith('.tsx') ||
+                          filename.endsWith('.js') ||
+                          filename.endsWith('.jsx') ||
+                          filename.endsWith('.conf') ||
+                          filename.endsWith('.ini') ||
+                          filename.endsWith('.cfg') ||
+                          filename.endsWith('.yml') ||
+                          filename.endsWith('.yaml') ||
+                          filename.endsWith('.toml') ||
+                          !filename.includes('.')) {
                     // Text preview
                     const reader = new FileReader();
                     reader.onload = (e) => {
