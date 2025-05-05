@@ -476,6 +476,30 @@ class ContainerEngine:
             image=image
         )
 
+    async def _get_listening_ports(self, pid: int) -> List[int]:
+        try:
+            async with aiofiles.open(f"/proc/{pid}/net/tcp", "r") as f:
+                lines = await f.readlines()
+                
+            ports = []
+            for line in lines[1:]:  # Skip header line
+                fields = line.strip().split()
+                if len(fields) >= 4 and fields[3] == "0A":  # 0A is listening state
+                    # Parse local_address:port (hex)
+                    local_addr = fields[1].split(":")
+                    if len(local_addr) == 2:
+                        port_hex = local_addr[1]
+                        port = int(port_hex, 16)
+                        ports.append(port)
+            
+            # Sort ports with common web server ports first
+            common_ports = [80, 8000, 8080, 3000, 4000]
+            ports.sort(key=lambda x: (common_ports.index(x) if x in common_ports else len(common_ports), x))
+            
+            return ports
+        except (FileNotFoundError, PermissionError, ValueError):
+            return []
+
     async def _get_container_ip(self, container_id: str) -> Tuple[str, Optional[str]]:
         """Inspect a container and return its assigned private IP and first exposed port."""
         container_info = await self._get_container_info(container_id)
@@ -494,26 +518,25 @@ class ContainerEngine:
         first_exposed_port = next(iter(ports.keys()), None) if ports else None
         first_exposed_port = first_exposed_port.split('/')[0] if first_exposed_port else None
 
+        # If no exposed port found, try to get listening ports from the container
+        if first_exposed_port is None:
+            try:
+                # Get container's PID
+                pid = container_info["State"]["Pid"]
+                if pid > 0:  # Only if container is running
+                    listening_ports = await self._get_listening_ports(pid)
+                    if listening_ports:
+                        first_exposed_port = str(listening_ports[0])
+            except (KeyError, ValueError):
+                pass
+
         return ip_address, first_exposed_port
 
     async def get_container(self, container_id: str) -> Optional[Container]:
         """Inspect a container and return a `Container` object."""
         try:
             data = await self._get_container_info(container_id)
-
-            # First try the default network IP address
-            ip_address = data["NetworkSettings"]["IPAddress"]
-            
-            # If IP is empty and there are networks, get the first network's IP
-            if not ip_address and "Networks" in data["NetworkSettings"]:
-                # Get the first network's IP address
-                first_network = next(iter(data["NetworkSettings"]["Networks"].values()))
-                ip_address = first_network.get("IPAddress", "")
-
-            # Extract the first exposed port (even if its value is null)
-            ports = data["NetworkSettings"]["Ports"]
-            first_exposed_port = next(iter(ports.keys()), None) if ports else None
-            first_exposed_port = first_exposed_port.split('/')[0] if first_exposed_port else None
+            ip_address, first_exposed_port = await self._get_container_ip(container_id)
 
             # Check if container is interactive by looking at the TTY flag
             interactive = data["Config"].get("Tty", False)
