@@ -10,11 +10,23 @@
     <!-- Add xterm.js dependencies -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.js" integrity="sha512-Gujw5GajF5is3nMoGv9X+tCMqePLL/60qvAv1LofUZTV9jK8ENbM9L+maGmOsNzuZaiuyc/fpph1KT9uR5w3CQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.5.0/xterm.min.css" integrity="sha512-XpXUuzg5afNt1bsgnrOesXP70TLH8tXYYK5sK+Y0UV+YBvJn9EfRFYWy4HT3TVDfH0nl1CO0lwOxIrt2gk9qjg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
     <style>
         #terminal {
             background: #1e1e1e;
             padding: 10px;
             border-radius: 4px;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        #terminal-view {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .xterm-viewport {
+            overflow-y: auto !important;
         }
     </style>
 </head>
@@ -295,6 +307,7 @@
         let terminalWs = null;
         let terminalDataHandler = null;
         let currentTab = 'exec';
+        let terminalResizeObserver = null;  // Add variable to store the observer
 
         // Add SSE connection management
         let eventSource = null;
@@ -366,6 +379,12 @@
                 term = null;
             }
             
+            // Clean up existing resize observer if any
+            if (terminalResizeObserver) {
+                terminalResizeObserver.disconnect();
+                terminalResizeObserver = null;
+            }
+            
             // Create new terminal instance
             term = new Terminal({
                 cursorBlink: true,
@@ -376,9 +395,22 @@
                     foreground: '#ffffff',
                     cursor: '#ffffff',
                     selection: '#264f78'
-                }
+                },
+                scrollback: 1000,
+                rows: 24,
+                cols: 80
             });
             term.open(document.getElementById('terminal'));
+            
+            // Load and apply the fit addon
+            const fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            
+            fitAddon.fit();
+            
+            window.addEventListener('resize', () => {
+                fitAddon.fit();
+            });
         }
 
         // Connect terminal to sandbox
@@ -442,6 +474,11 @@
                 term.dispose();
                 term = null;
                 terminalDataHandler = null;
+            }
+            // Clean up resize observer
+            if (terminalResizeObserver) {
+                terminalResizeObserver.disconnect();
+                terminalResizeObserver = null;
             }
         }
 
