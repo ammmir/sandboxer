@@ -220,6 +220,7 @@
                             <li><a onclick="populateExample('nginx'); this.closest('details').removeAttribute('open')">Nginx</a></li>
                             <li><a onclick="populateExample('firefox'); this.closest('details').removeAttribute('open')">Firefox</a></li>
                             <li><a onclick="populateExample('bash'); this.closest('details').removeAttribute('open')">Bash</a></li>
+                            <li><a onclick="populateExample('fresh'); this.closest('details').removeAttribute('open')">Fresh (Deno)</a></li>
                         </ul>
                     </details>
                 </div>
@@ -839,6 +840,13 @@
                 args: [],
                 env: {},
                 interactive: true
+            },
+            fresh: {
+                image: 'denoland/deno',
+                label: 'Fresh (Deno)',
+                args: ['bash', '-c', 'deno run -A -r https://fresh.deno.dev fresh-demo --tailwind --vscode && cd fresh-demo && deno task start; exec bash'],
+                env: {},
+                interactive: true
             }
         };
 
@@ -1159,15 +1167,13 @@
                 if (!term) {
                     initTerminal();
                 }
-                if (selectedSandbox) {
+                if (selectedSandbox && !terminalWs) {
                     connectTerminal();
                 }
                 // Focus the terminal
                 if (term) {
                     term.focus();
                 }
-            } else {
-                disconnectTerminal();
             }
 
             // Handle logs fetching
