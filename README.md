@@ -1,6 +1,6 @@
 # sandboxer
 
-https://github.com/user-attachments/assets/a8ba8ffa-f83b-48ae-b790-34a63ca2bc4f
+https://github.com/user-attachments/assets/ed2bbf10-f430-4426-a38e-fb82e0b0c7d0
 
 Based on https://amirmalik.net/2025/03/07/code-sandboxes-for-llm-ai-agents
 
