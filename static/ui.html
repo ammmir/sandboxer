@@ -238,6 +238,12 @@
                     </label>
                     <input type="text" id="sandbox-label" class="input input-bordered w-full" placeholder="Sandbox Label">
                 </div>
+                <div class="form-control flex-1">
+                    <label class="label">
+                        <span class="label-text">Hostname (optional)</span>
+                    </label>
+                    <input type="text" id="sandbox-hostname" class="input input-bordered w-full" placeholder="Auto-assigned if blank">
+                </div>
             </div>
 
             <div class="form-control mb-4">
@@ -603,13 +609,7 @@
                 copyButton.onclick = (e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    // Get all text content from the result div, excluding the command line
-                    const textToCopy = Array.from(resultDiv.childNodes)
-                        .filter(node => !node.textContent.startsWith('>'))
-                        .map(node => node.textContent)
-                        .join('\n')
-                        .trim();
-                    navigator.clipboard.writeText(textToCopy);
+                    navigator.clipboard.writeText(sb.hostname || "");
                 };
                 
                 secondLine.appendChild(hostnameSpan);
@@ -847,6 +847,7 @@
                 // Clear all fields
                 document.getElementById('sandbox-image').value = '';
                 document.getElementById('sandbox-label').value = '';
+                document.getElementById('sandbox-hostname').value = '';
                 document.getElementById('sandbox-args').value = '';
                 document.getElementById('sandbox-env').value = '';
                 document.getElementById('sandbox-interactive').checked = false;
@@ -856,6 +857,7 @@
             const exampleData = SANDBOX_EXAMPLES[example];
             document.getElementById('sandbox-image').value = exampleData.image;
             document.getElementById('sandbox-label').value = exampleData.label;
+            document.getElementById('sandbox-hostname').value = '';
             document.getElementById('sandbox-args').value = exampleData.args.join('\n');
             document.getElementById('sandbox-env').value = Object.entries(exampleData.env)
                 .map(([key, value]) => `${key}=${value}`)
@@ -886,6 +888,7 @@
             hideError();
             const image = document.getElementById('sandbox-image').value.trim();
             const label = document.getElementById('sandbox-label').value.trim();
+            const hostname = document.getElementById('sandbox-hostname').value.trim();
             const interactive = document.getElementById('sandbox-interactive').checked;
             if (!image || !label) return showError("Please enter a Docker image and a label.");
 
@@ -914,7 +917,7 @@
                 const response = await fetch("/sandboxes", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ image, label, env, args, interactive })
+                    body: JSON.stringify({ image, label, hostname, env, args, interactive })
                 });
 
                 if (!response.ok) throw new Error(await response.text());
@@ -929,6 +932,13 @@
             } finally {
                 setCreateLoading(false);
             }
+
+            // Clear the form fields
+            document.getElementById('sandbox-image').value = '';
+            document.getElementById('sandbox-label').value = '';
+            document.getElementById('sandbox-hostname').value = '';
+            document.getElementById('sandbox-args').value = '';
+            document.getElementById('sandbox-env').value = '';
         }
 
         async function forkSandbox() {
@@ -936,6 +946,13 @@
             try {
                 const label = prompt("Enter label for the forked sandbox:");
                 if (!label) return;
+
+                // Get the fork button and show loading state
+                const forkButton = document.querySelector('button[onclick="forkSandbox()"]');
+                const originalContent = forkButton.innerHTML;
+                forkButton.innerHTML = '<span class="loading loading-spinner loading-sm"></span>';
+                forkButton.disabled = true;
+
                 const response = await fetch(`/sandboxes/${selectedSandbox}/fork`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -946,6 +963,11 @@
                 loadSandboxes();
             } catch (error) {
                 showError(error.message);
+            } finally {
+                // Restore the fork button
+                const forkButton = document.querySelector('button[onclick="forkSandbox()"]');
+                forkButton.innerHTML = '<img src="/static/images/icon-fork.svg" alt="Fork" class="w-5 h-5">';
+                forkButton.disabled = false;
             }
         }
 

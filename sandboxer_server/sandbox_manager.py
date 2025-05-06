@@ -237,6 +237,7 @@ class CreateSandboxRequest(BaseModel):
     env: dict[str, str] = {}
     args: list[str] = []
     interactive: bool
+    hostname: str | None = None
 
 class ForkSandboxRequest(BaseModel):
     label: str
@@ -300,7 +301,7 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
         with closing(get_db()) as db:
             network_row_id = db.execute("SELECT rowid FROM networks WHERE name = ?", (req.state.network,)).fetchone()['rowid']
 
-        container = await engine.start_container(
+        container_id = await engine.create_container(
             image=request.image, 
             name=container_name, 
             env=request.env, 
@@ -309,8 +310,10 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
             network=req.state.network,
             subuid=subordinate.get_subuid(network_row_id),
             quota_projname=req.state.network,
-            config=ContainerConfig(cpus="1.0", memory="2g")
+            config=ContainerConfig(cpus="1.0", memory="2g"),
+            hostname=request.hostname
         )
+        container = await engine.start_container(container_id)
         
         with closing(get_db()) as db:
             db.execute(

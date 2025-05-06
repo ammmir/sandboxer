@@ -70,7 +70,7 @@ class Container:
 
 class ContainerEngine:
     PODMAN_PATH = 'podman'
-    USE_UIDMAP = False
+    USE_UIDMAP = True
 
     def __init__(self, quota: QuotaManager, podman_path: str = PODMAN_PATH):
         self.quota = quota
@@ -397,10 +397,10 @@ class ContainerEngine:
         output = await self._run_podman_command(['network', 'inspect', name])
         return json.loads(output)[0]
 
-    async def start_container(self, image: str, name: str, subuid: int, quota_projname: str, config: 'ContainerConfig', env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False, hostname: str = None) -> Container:
+    async def create_container(self, image: str, name: str, subuid: int, quota_projname: str, config: 'ContainerConfig', env: dict[str, str] = None, args: list[str] = None, network: str = None, interactive: bool = False, hostname: str = None) -> str:
         """
-        Start a new container using `podman create` and `podman start`.
-        Returns a `Container` object with its assigned IP address.
+        Create a new container using `podman create`.
+        Returns the container ID.
         
         Args:
             image: Container image to use
@@ -459,12 +459,25 @@ class ContainerEngine:
         if args:
             create_args.extend(args)
         
-        container_id = await self._run_podman_command(create_args)
+        return await self._run_podman_command(create_args)
 
+    async def start_container(self, container_id: str) -> Container:
+        """
+        Start a container and return a Container object.
+        
+        Args:
+            container_id: The ID of the container to start
+        """
         # Start the container
         await self._run_podman_command(['start', container_id])
 
         container_ip, exposed_port = await self._get_container_ip(container_id)
+
+        # Get container info to get name, hostname, and image
+        container_info = await self._get_container_info(container_id)
+        name = container_info.get("Name", "").lstrip("/")
+        hostname = container_info["Config"].get("Hostname")
+        image = container_info.get("Image", "unknown")
 
         return Container(
             engine=self,
@@ -834,7 +847,114 @@ class ContainerEngine:
         with open(f"{self.podman_graphroot}/overlay-containers/{new_id}/userdata/config.json", 'w') as f:
             json.dump(config, f)
 
-    async def fork_container(self, container_id: str, new_name: str, keep_snapshot: bool = False, hostname: str = None) -> Tuple[Container, str]:
+    async def fork_container(self, container_id: str, new_name: str, hostname: Optional[str] = None) -> Container:
+        logger.info(f"Starting to fork container {container_id} to {new_name}")
+        # Step 1: Pause the parent container
+        logger.info(f"Pausing parent container {container_id}")
+        await self.pause_sandbox(container_id)
+
+        try:
+            # Step 2: Get parent container info
+            logger.info(f"Getting parent container info for {container_id}")
+            parent_info = await self._get_container_info(container_id)
+            parent_ip, _ = await self._get_container_ip(container_id)
+            image = parent_info["ImageName"].removeprefix("docker.io/library/")
+            logger.info(f"Parent container image: {image}")
+            
+            env = {
+                k: v for k, v in (
+                    (e.split('=', 1) if '=' in e else (e, '')) 
+                    for e in parent_info["Config"].get("Env", [])
+                )
+            }
+            cmd = parent_info["Config"].get("Cmd", [])
+            hostname = hostname or f"{parent_info['Config'].get('Hostname', new_name)}-fork"
+            quota_projname = parent_info["Config"]["Labels"].get("quota_projname", f"{new_name}-fork")
+            
+            # Get subuid from parent container's IDMappings
+            if ContainerEngine.USE_UIDMAP:
+                uid_map = parent_info["HostConfig"]["IDMappings"]["UidMap"][0]
+                # Parse the mapping (format: "container_id:host_id:size")
+                subuid = int(uid_map.split(':')[1])
+                logger.info(f"Using UID mapping from parent container: {uid_map}")
+            else:
+                subuid = 0
+                logger.info("UID mapping disabled, using subuid 0")
+
+            # Get interactive mode from parent container
+            interactive = parent_info["Config"].get("Tty", False)
+            logger.info(f"Using interactive mode from parent: {interactive}")
+
+            # Get network from parent container
+            network = None
+            if parent_info["NetworkSettings"]["Networks"]:
+                # Get the first network name
+                network = next(iter(parent_info["NetworkSettings"]["Networks"].keys()))
+                logger.info(f"Using network from parent: {network}")
+                
+            # Step 3: Create the new container
+            logger.info(f"Creating new container {new_name} with image {image}")
+            new_id = await self.create_container(
+                image=image,
+                name=new_name,
+                env=env,
+                args=cmd,
+                interactive=interactive,
+                network=network,
+                subuid=subuid,
+                quota_projname=quota_projname,
+                config=ContainerConfig(cpus="1.0", memory="2g"),
+                hostname=hostname
+            )
+            logger.info(f"New container created with ID: {new_id}")
+
+            # Step 4: Mount the new container
+            logger.info(f"Mounting new container {new_id}")
+            mount_output = await self._run_podman_command(["mount", new_id])
+            new_merged = mount_output.strip()
+            logger.info(f"New container mounted at: {new_merged}")
+
+            try:
+                # Step 5: Run podman diff
+                logger.info(f"Getting file system differences between {container_id} and {new_id}")
+                diff_output = await self._run_podman_command(["diff", "--format", "json", container_id])
+                diff = json.loads(diff_output)
+                logger.info(f"Diff: {diff}")
+                parent_merged = parent_info["GraphDriver"]["Data"]["MergedDir"]
+                logger.info(f"Parent merged: {parent_merged}")
+
+                # Step 6: Apply file changes using rsync
+                logger.info("Applying file system changes from parent to new container")
+                for rel_path in diff.get("added", []) + diff.get("changed", []):
+                    logger.debug(f"Applying file system change: {rel_path}")
+                    src = os.path.join(parent_merged, rel_path.lstrip('/'))
+                    dst = os.path.join(new_merged, rel_path.lstrip('/'))
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    await asyncio.create_subprocess_exec("rsync", "-a", src, dst)
+
+                for rel_path in diff.get("deleted", []):
+                    target = os.path.join(new_merged, rel_path.lstrip('/'))
+                    if os.path.exists(target):
+                        os.remove(target)
+                        logger.info(f"Deleted file: {rel_path}")
+
+            finally:
+                # Step 7: Unmount the new container
+                logger.info(f"Unmounting new container {new_id}")
+                await self._run_podman_command(["unmount", new_id])
+
+        finally:
+            # Step 8: Unpause the parent container
+            logger.info(f"Unpausing parent container {container_id}")
+            await self.unpause_sandbox(container_id)
+
+        # Step 9: Start the new container and return it
+        logger.info(f"Starting new container {new_id}")
+        container = await self.start_container(new_id)
+        logger.info(f"Successfully forked container {container_id} to {new_id}")
+        return container, None
+
+    async def fork_container_via_criu(self, container_id: str, new_name: str, keep_snapshot: bool = False, hostname: str = None) -> Tuple[Container, str]:
         """
         Forks a running container by:
         1. Creating a snapshot
