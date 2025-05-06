@@ -12,6 +12,7 @@ import re
 import time
 import aiofiles
 import logging
+import stat
 
 from uvicorn.config import LOGGING_CONFIG
 from uvicorn.logging import DefaultFormatter
@@ -919,24 +920,95 @@ class ContainerEngine:
                 logger.info(f"Getting file system differences between {container_id} and {new_id}")
                 diff_output = await self._run_podman_command(["diff", "--format", "json", container_id])
                 diff = json.loads(diff_output)
-                logger.info(f"Diff: {diff}")
                 parent_merged = parent_info["GraphDriver"]["Data"]["MergedDir"]
                 logger.info(f"Parent merged: {parent_merged}")
 
-                # Step 6: Apply file changes using rsync
+                # Step 6: Apply file changes using rsync, but only for parent-most directories
                 logger.info("Applying file system changes from parent to new container")
-                for rel_path in diff.get("added", []) + diff.get("changed", []):
-                    logger.debug(f"Applying file system change: {rel_path}")
-                    src = os.path.join(parent_merged, rel_path.lstrip('/'))
-                    dst = os.path.join(new_merged, rel_path.lstrip('/'))
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    await asyncio.create_subprocess_exec("rsync", "-a", src, dst)
-
+                
+                # First process deleted paths
                 for rel_path in diff.get("deleted", []):
                     target = os.path.join(new_merged, rel_path.lstrip('/'))
                     if os.path.exists(target):
                         os.remove(target)
                         logger.info(f"Deleted file: {rel_path}")
+
+                # Helper function to check if a path is within the merged directory
+                def is_safe_path(path: str) -> bool:
+                    try:
+                        return os.path.abspath(path).startswith(os.path.abspath(new_merged)) or os.path.abspath(path).startswith(os.path.abspath(parent_merged))
+                    except Exception:
+                        return False
+
+                # Helper function to safely copy a file or directory
+                def safe_copy(src: str, dst: str) -> None:
+                    try:
+                        src_stat = os.lstat(src)
+                        mode = src_stat.st_mode
+
+                        if stat.S_ISREG(mode):  # Regular file
+                            logger.info(f"Copying regular file {src} to {dst}")
+                            shutil.copy2(src, dst)
+                            os.chown(dst, src_stat.st_uid, src_stat.st_gid)
+                        elif stat.S_ISDIR(mode):  # Directory
+                            logger.info(f"Copying directory {src} to {dst}")
+                            os.makedirs(dst, exist_ok=True)
+                            os.chmod(dst, mode)
+                            os.chown(dst, src_stat.st_uid, src_stat.st_gid)
+                        elif stat.S_ISLNK(mode):  # Symlink
+                            logger.info(f"Copying symlink {src} to {dst}")
+                            link_target = os.readlink(src)
+                            
+                            # Check if the resolved target would be outside merged dir
+                            resolved_target = link_target
+                            if not os.path.isabs(link_target):
+                                resolved_target = os.path.normpath(os.path.join(os.path.dirname(src), link_target))
+                            
+                            # Only create symlink if resolved target is within merged dir
+                            if is_safe_path(resolved_target):
+                                # Copy the symlink as-is, preserving relative paths
+                                os.symlink(link_target, dst)
+                                try:
+                                    os.lchown(dst, src_stat.st_uid, src_stat.st_gid)
+                                except (OSError, AttributeError):
+                                    pass  # Ignore if we can't set symlink ownership
+                            else:
+                                logger.warning(f"Skipping symlink {src} as its target {resolved_target} would be outside merged directory")
+                        elif stat.S_ISFIFO(mode):  # Named pipe
+                            logger.info(f"Copying named pipe {src} to {dst}")
+                            os.mkfifo(dst, mode)
+                            os.chown(dst, src_stat.st_uid, src_stat.st_gid)
+                        else:
+                            logger.warning(f"Unsupported file type for {src}, skipping")
+                    except Exception as e:
+                        logger.error(f"Error copying {src} to {dst}: {e}")
+                        raise
+
+                # Process added paths
+                for rel_path in diff.get("added", []):
+                    logger.info(f"Applying file system change (added): {rel_path}")
+                    src = os.path.join(parent_merged, rel_path.lstrip('/'))
+                    dst = os.path.join(new_merged, rel_path.lstrip('/'))
+                    
+                    # Ensure destination parent directory exists
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    
+                    # Copy the file/directory/symlink
+                    safe_copy(src, dst)
+
+                # Process changed paths
+                for rel_path in diff.get("changed", []):
+                    logger.info(f"Applying file system change (changed): {rel_path}")
+                    src = os.path.join(parent_merged, rel_path.lstrip('/'))
+                    dst = os.path.join(new_merged, rel_path.lstrip('/'))
+                    
+                    # Ensure destination parent directory exists
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    
+                    # Copy the file/directory/symlink
+                    safe_copy(src, dst)
+
+                logger.info(f"File system changes applied: {len(diff.get('added', []))} added, {len(diff.get('changed', []))} changed, {len(diff.get('deleted', []))} deleted")
 
             finally:
                 # Step 7: Unmount the new container
