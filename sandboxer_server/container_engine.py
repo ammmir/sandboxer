@@ -13,6 +13,7 @@ import time
 import aiofiles
 import logging
 import stat
+from reflink_copy import reflink
 
 from uvicorn.config import LOGGING_CONFIG
 from uvicorn.logging import DefaultFormatter
@@ -916,12 +917,17 @@ class ContainerEngine:
             logger.info(f"New container mounted at: {new_merged}")
 
             try:
+                new_info = await self._get_container_info(new_id)
+                new_diff = new_info["GraphDriver"]["Data"]["UpperDir"]
+
                 # Step 5: Run podman diff
                 logger.info(f"Getting file system differences between {container_id} and {new_id}")
                 diff_output = await self._run_podman_command(["diff", "--format", "json", container_id])
                 diff = json.loads(diff_output)
                 parent_merged = parent_info["GraphDriver"]["Data"]["MergedDir"]
+                parent_diff = parent_info["GraphDriver"]["Data"]["UpperDir"]
                 logger.info(f"Parent merged: {parent_merged}")
+                logger.info(f"Parent diff: {parent_diff}")
 
                 # Step 6: Apply file changes using rsync, but only for parent-most directories
                 logger.info("Applying file system changes from parent to new container")
@@ -936,7 +942,7 @@ class ContainerEngine:
                 # Helper function to check if a path is within the merged directory
                 def is_safe_path(path: str) -> bool:
                     try:
-                        return os.path.abspath(path).startswith(os.path.abspath(new_merged)) or os.path.abspath(path).startswith(os.path.abspath(parent_merged))
+                        return os.path.abspath(path).startswith(os.path.abspath(new_merged)) or os.path.abspath(path).startswith(os.path.abspath(parent_merged)) or os.path.abspath(path).startswith(os.path.abspath(parent_diff))
                     except Exception:
                         return False
 
@@ -947,16 +953,17 @@ class ContainerEngine:
                         mode = src_stat.st_mode
 
                         if stat.S_ISREG(mode):  # Regular file
-                            logger.info(f"Copying regular file {src} to {dst}")
-                            shutil.copy2(src, dst)
+                            logger.debug(f"Copying regular file {src} to {dst}")
+                            reflink(src, dst)
+                            os.chmod(dst, mode)
                             os.chown(dst, src_stat.st_uid, src_stat.st_gid)
                         elif stat.S_ISDIR(mode):  # Directory
-                            logger.info(f"Copying directory {src} to {dst}")
+                            logger.debug(f"Copying directory {src} to {dst}")
                             os.makedirs(dst, exist_ok=True)
                             os.chmod(dst, mode)
                             os.chown(dst, src_stat.st_uid, src_stat.st_gid)
                         elif stat.S_ISLNK(mode):  # Symlink
-                            logger.info(f"Copying symlink {src} to {dst}")
+                            logger.debug(f"Copying symlink {src} to {dst}")
                             link_target = os.readlink(src)
                             
                             # Check if the resolved target would be outside merged dir
@@ -975,8 +982,14 @@ class ContainerEngine:
                             else:
                                 logger.warning(f"Skipping symlink {src} as its target {resolved_target} would be outside merged directory")
                         elif stat.S_ISFIFO(mode):  # Named pipe
-                            logger.info(f"Copying named pipe {src} to {dst}")
+                            logger.warning(f"Copying named pipe {src} to {dst}")
                             os.mkfifo(dst, mode)
+                            os.chown(dst, src_stat.st_uid, src_stat.st_gid)
+                        elif stat.S_ISSOCK(mode):  # Unix domain socket
+                            logger.debug(f"Copying Unix domain socket {src} to {dst}")
+                            # Create a new socket with the same mode
+                            os.mknod(dst, mode | stat.S_IFSOCK)
+                            os.chmod(dst, stat.S_IMODE(mode))
                             os.chown(dst, src_stat.st_uid, src_stat.st_gid)
                         else:
                             logger.warning(f"Unsupported file type for {src}, skipping")
@@ -984,26 +997,47 @@ class ContainerEngine:
                         logger.error(f"Error copying {src} to {dst}: {e}")
                         raise
 
+                # Helper function to create directories with proper ownership
+                def makedirs_with_ownership(path: str, uid: int, gid: int, mode: int = 0o755) -> None:
+                    """Create directories recursively, setting ownership and permissions for each intermediate directory."""
+                    # Get absolute path
+                    path = os.path.abspath(path)
+                    
+                    # Get all parent directories
+                    dirs = []
+                    current = path
+                    while current != '/':
+                        dirs.append(current)
+                        current = os.path.dirname(current)
+                    
+                    # Create directories from root to leaf
+                    for dir_path in reversed(dirs):
+                        if not os.path.exists(dir_path):
+                            os.mkdir(dir_path)
+                            os.chmod(dir_path, mode)
+                            os.chown(dir_path, uid, gid)
+                            logger.debug(f"Created directory {dir_path} with permissions {mode:o} and ownership {uid}:{gid}")
+
                 # Process added paths
                 for rel_path in diff.get("added", []):
-                    logger.info(f"Applying file system change (added): {rel_path}")
-                    src = os.path.join(parent_merged, rel_path.lstrip('/'))
-                    dst = os.path.join(new_merged, rel_path.lstrip('/'))
+                    logger.debug(f"Applying file system change (added): {rel_path}")
+                    src = os.path.join(parent_diff, rel_path.lstrip('/'))
+                    dst = os.path.join(new_diff, rel_path.lstrip('/'))
                     
                     # Ensure destination parent directory exists
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    makedirs_with_ownership(os.path.dirname(dst), subuid, subuid)
                     
                     # Copy the file/directory/symlink
                     safe_copy(src, dst)
 
                 # Process changed paths
                 for rel_path in diff.get("changed", []):
-                    logger.info(f"Applying file system change (changed): {rel_path}")
-                    src = os.path.join(parent_merged, rel_path.lstrip('/'))
-                    dst = os.path.join(new_merged, rel_path.lstrip('/'))
+                    logger.debug(f"Applying file system change (changed): {rel_path}")
+                    src = os.path.join(parent_diff, rel_path.lstrip('/'))
+                    dst = os.path.join(new_diff, rel_path.lstrip('/'))
                     
                     # Ensure destination parent directory exists
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    makedirs_with_ownership(os.path.dirname(dst), subuid, subuid)
                     
                     # Copy the file/directory/symlink
                     safe_copy(src, dst)

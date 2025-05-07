@@ -11,6 +11,7 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "python-dotenv>=1.0.1",
     "python-ulid>=3.0.0",
+    "reflink-copy>=0.3.2",
     "uvicorn>=0.34.0",
     "websockets>=15.0.1",
 ]
