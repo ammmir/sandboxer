@@ -162,8 +162,13 @@ Run `podman system reset` to reconfigure the container store.
 
 ### Security
 
-Restrict syslog access:
+Use [gVisor](https://gvisor.dev) for a hardened container runtime. After installation, ensure `/etc/containers/containers.conf` contains:
 
-```bash
-sysctl -w kernel.dmesg_restrict=1
-```
+```ini
+[engine]
+runtime = "runsc"
+````
+
+Subsequently created sandboxes will automatically use gVisor as the container runtime.
+
+Otherwise, even though Sandboxer attempts to drop all capabilities and only adds necessary ones, you'll still have to do some hardening on the host side (e.g., restrict syslog access with `sysctl -w kernel.dmesg_restrict=1`, and probably more.)
