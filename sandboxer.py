@@ -115,7 +115,7 @@ class AuthMiddleware:
         return await self.app(scope, receive, send)
 
 hx = httpx.AsyncClient()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/auth/github", include_in_schema=False)
 async def auth_github():
