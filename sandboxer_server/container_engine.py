@@ -26,14 +26,14 @@ from .quota_manager import QuotaManager
 from .subordinate_manager import SubordinateManager
 
 class ContainerConfig:
-    def __init__(self, cpus: str = "0.5", memory: str = "512m", storage_size: str = "5g"):
+    def __init__(self, cpus: str = None, memory: str = None, storage_size: str = None):
         self.capabilities = os.getenv("DEFAULT_CAPABILITIES",
             "NET_BIND_SERVICE,CHOWN,IPC_LOCK,SETGID,SETUID,SETGID,SETPCAP,SYS_CHROOT,SYS_NICE,SYS_PTRACE,DAC_READ_SEARCH,FOWNER,DAC_OVERRIDE,KILL"
         ).split(',')
-        self.cpus = cpus
-        self.memory = memory
+        self.cpus = cpus or os.getenv("SANDBOX_CPU", "0.5")
+        self.memory = memory or os.getenv("SANDBOX_MEMORY", "512m")
         self.pids_limit = os.getenv("DEFAULT_PIDS_LIMIT", "1024")
-        self.storage_size = storage_size
+        self.storage_size = storage_size or os.getenv("SANDBOX_STORAGE", "5g")
 
 class Container:
     def __init__(self, engine: 'ContainerEngine', **kwargs):
@@ -905,7 +905,7 @@ class ContainerEngine:
                 network=network,
                 subuid=subuid,
                 quota_projname=quota_projname,
-                config=ContainerConfig(cpus="1.0", memory="2g"),
+                config=ContainerConfig(),
                 hostname=hostname
             )
             logger.info(f"New container created with ID: {new_id}")

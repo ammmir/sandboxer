@@ -310,7 +310,7 @@ async def create_sandbox(request: CreateSandboxRequest, req: Request):
             network=req.state.network,
             subuid=subordinate.get_subuid(network_row_id),
             quota_projname=req.state.network,
-            config=ContainerConfig(cpus="1.0", memory="2g"),
+            config=ContainerConfig(),
             hostname=request.hostname
         )
         container = await engine.start_container(container_id)
