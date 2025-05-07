@@ -229,7 +229,7 @@ async def lifespan(app: FastAPI):
     await sse_manager.shutdown()
     await engine.close()
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, title="Sandboxer", description="A sandboxing service for running code in a secure environment.")
 
 class CreateSandboxRequest(BaseModel):
     image: str
