@@ -992,6 +992,10 @@ async def proxy_websocket(websocket: WebSocket, sandbox_id_or_name: str, path: s
     else:
         selected_protocol = requested_protocols[0] if requested_protocols else None
 
+    query_string = websocket.scope["query_string"].decode()
+    if query_string:
+        path = f"{path}?{query_string}"
+
     sandbox_url = f"ws://{container.ip_address}:{container.exposed_port}/{path}"
     print(f"Connecting to sandbox WebSocket: {sandbox_url} with protocol: {selected_protocol}")
     
@@ -1006,6 +1010,7 @@ async def proxy_websocket(websocket: WebSocket, sandbox_id_or_name: str, path: s
             
         async with websockets.connect(
             sandbox_url,
+            origin=websocket.headers.get("origin"),
             subprotocols=[selected_protocol] if selected_protocol else None,
             additional_headers=additional_headers if additional_headers else None
         ) as sandbox_ws:
